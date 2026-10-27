@@ -131,8 +131,20 @@ message ChargeResponse {
   string transaction_id = 1;
 }
 
+message RefundRequest {
+  string transaction_id = 1;
+  Money amount = 2;
+}
+
+message RefundResponse {
+  string refund_id = 1;
+}
+
 service PaymentService {
   rpc Charge(ChargeRequest) returns (ChargeResponse) {}
+  // Added with the payment decline-and-refund change (additive). Idempotent
+  // per transaction_id. Used to compensate a charge when shipping fails.
+  rpc Refund(RefundRequest) returns (RefundResponse) {}
 }
 
 // --- Email ---

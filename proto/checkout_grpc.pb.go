@@ -580,6 +580,7 @@ var ShippingService_ServiceDesc = grpc.ServiceDesc{
 
 const (
 	PaymentService_Charge_FullMethodName = "/hipstershop.PaymentService/Charge"
+	PaymentService_Refund_FullMethodName = "/hipstershop.PaymentService/Refund"
 )
 
 // PaymentServiceClient is the client API for PaymentService service.
@@ -587,6 +588,9 @@ const (
 // For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
 type PaymentServiceClient interface {
 	Charge(ctx context.Context, in *ChargeRequest, opts ...grpc.CallOption) (*ChargeResponse, error)
+	// Added with the payment decline-and-refund change (additive). Idempotent
+	// per transaction_id. Used to compensate a charge when shipping fails.
+	Refund(ctx context.Context, in *RefundRequest, opts ...grpc.CallOption) (*RefundResponse, error)
 }
 
 type paymentServiceClient struct {
@@ -607,11 +611,24 @@ func (c *paymentServiceClient) Charge(ctx context.Context, in *ChargeRequest, op
 	return out, nil
 }
 
+func (c *paymentServiceClient) Refund(ctx context.Context, in *RefundRequest, opts ...grpc.CallOption) (*RefundResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(RefundResponse)
+	err := c.cc.Invoke(ctx, PaymentService_Refund_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // PaymentServiceServer is the server API for PaymentService service.
 // All implementations must embed UnimplementedPaymentServiceServer
 // for forward compatibility.
 type PaymentServiceServer interface {
 	Charge(context.Context, *ChargeRequest) (*ChargeResponse, error)
+	// Added with the payment decline-and-refund change (additive). Idempotent
+	// per transaction_id. Used to compensate a charge when shipping fails.
+	Refund(context.Context, *RefundRequest) (*RefundResponse, error)
 	mustEmbedUnimplementedPaymentServiceServer()
 }
 
@@ -624,6 +641,9 @@ type UnimplementedPaymentServiceServer struct{}
 
 func (UnimplementedPaymentServiceServer) Charge(context.Context, *ChargeRequest) (*ChargeResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method Charge not implemented")
+}
+func (UnimplementedPaymentServiceServer) Refund(context.Context, *RefundRequest) (*RefundResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method Refund not implemented")
 }
 func (UnimplementedPaymentServiceServer) mustEmbedUnimplementedPaymentServiceServer() {}
 func (UnimplementedPaymentServiceServer) testEmbeddedByValue()                        {}
@@ -664,6 +684,24 @@ func _PaymentService_Charge_Handler(srv interface{}, ctx context.Context, dec fu
 	return interceptor(ctx, in, info, handler)
 }
 
+func _PaymentService_Refund_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RefundRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(PaymentServiceServer).Refund(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: PaymentService_Refund_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(PaymentServiceServer).Refund(ctx, req.(*RefundRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // PaymentService_ServiceDesc is the grpc.ServiceDesc for PaymentService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -674,6 +712,10 @@ var PaymentService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "Charge",
 			Handler:    _PaymentService_Charge_Handler,
+		},
+		{
+			MethodName: "Refund",
+			Handler:    _PaymentService_Refund_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},
