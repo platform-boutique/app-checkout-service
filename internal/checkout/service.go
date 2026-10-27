@@ -29,6 +29,11 @@ type Service struct {
 	ShippingConn       *grpc.ClientConn
 	PaymentConn        *grpc.ClientConn
 	EmailConn          *grpc.ClientConn
+
+	// OrderConn is the connection to order-service. nil (ORDER_SERVICE_ADDR unset)
+	// means orders are not stored and PlaceOrder behaves as before; when set,
+	// storing the order is mandatory (see orders.go).
+	OrderConn *grpc.ClientConn
 }
 
 func (s *Service) PlaceOrder(ctx context.Context, req *pb.PlaceOrderRequest) (*pb.PlaceOrderResponse, error) {
@@ -37,11 +42,18 @@ func (s *Service) PlaceOrder(ctx context.Context, req *pb.PlaceOrderRequest) (*p
 	if err := validateRequest(req); err != nil {
 		return nil, err
 	}
+	if s.ordersEnabled() {
+		if err := validateForOrders(req); err != nil {
+			return nil, err
+		}
+	}
 
-	orderID, err := uuid.NewUUID()
+	// A random (v4) UUID: the order id is also what the customer's tracking link uses.
+	orderUUID, err := uuid.NewRandom()
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "failed to generate order uuid")
 	}
+	orderID := orderUUID.String()
 
 	// Everything that can fail without side effects (cart, products, prices,
 	// shipping quote) runs before the card is charged.
@@ -62,23 +74,43 @@ func (s *Service) PlaceOrder(ctx context.Context, req *pb.PlaceOrderRequest) (*p
 		total = money.Must(money.Sum(total, multPrice))
 	}
 
+	// With order storage the order is written (PENDING) before the card is
+	// charged; if that fails nothing has been charged. The total stored is the
+	// very amount that is charged below.
+	if s.ordersEnabled() {
+		if err := checkOrderLimits(prep); err != nil {
+			return nil, err
+		}
+		if err := s.createOrder(ctx, orderID, req, prep, total); err != nil {
+			return nil, err
+		}
+	}
+
 	txID, err := s.chargeCard(ctx, total, req.CreditCard)
 	if err != nil {
 		log.Warnf("[PlaceOrder] charge failed: %v", err)
-		return nil, toStatus(err)
+		st := toStatus(err)
+		s.failOrder(ctx, orderID, st)
+		return nil, st
 	}
 	log.Infof("payment went through (transaction_id: %s)", txID)
 
 	shippingTrackingID, err := s.shipOrder(ctx, req.Address, prep.cartItems)
 	if err != nil {
 		log.Errorf("[PlaceOrder] shipping failed after the charge (transaction_id: %s): %v", txID, err)
-		return nil, s.compensate(ctx, orderID.String(), txID, total, toStatus(err))
+		st := s.compensate(ctx, orderID, txID, total, toStatus(err))
+		s.failOrder(ctx, orderID, st)
+		return nil, st
 	}
+
+	// Charged and shipped: the order is PLACED. A failure here is only logged
+	// (the customer must not see an error for a purchase that went through).
+	s.confirmOrder(ctx, orderID, shippingTrackingID, txID)
 
 	_ = s.emptyUserCart(ctx, req.UserId)
 
 	orderResult := &pb.OrderResult{
-		OrderId:            orderID.String(),
+		OrderId:            orderID,
 		ShippingTrackingId: shippingTrackingID,
 		ShippingCost:       prep.shippingCostLocalized,
 		ShippingAddress:    req.Address,
@@ -98,6 +130,7 @@ func (s *Service) PlaceOrder(ctx context.Context, req *pb.PlaceOrderRequest) (*p
 
 type orderPrep struct {
 	orderItems            []*pb.OrderItem
+	products              []*pb.Product // same order as orderItems; name/picture snapshots for the stored order
 	cartItems             []*pb.CartItem
 	shippingCostLocalized *pb.Money
 }
@@ -114,7 +147,7 @@ func (s *Service) prepareOrderItemsAndShippingQuote(ctx context.Context, userID,
 		return out, status.Error(codes.FailedPrecondition, "the cart is empty")
 	}
 
-	orderItems, err := s.prepOrderItems(ctx, cartItems, userCurrency)
+	orderItems, products, err := s.prepOrderItems(ctx, cartItems, userCurrency)
 	if err != nil {
 		return out, fmt.Errorf("failed to prepare order: %w", err)
 	}
@@ -132,6 +165,7 @@ func (s *Service) prepareOrderItemsAndShippingQuote(ctx context.Context, userID,
 	out.shippingCostLocalized = shippingPrice
 	out.cartItems = cartItems
 	out.orderItems = orderItems
+	out.products = products
 	return out, nil
 }
 
@@ -151,7 +185,7 @@ func (s *Service) emptyUserCart(ctx context.Context, userID string) error {
 	return nil
 }
 
-func (s *Service) prepOrderItems(ctx context.Context, items []*pb.CartItem, userCurrency string) ([]*pb.OrderItem, error) {
+func (s *Service) prepOrderItems(ctx context.Context, items []*pb.CartItem, userCurrency string) ([]*pb.OrderItem, []*pb.Product, error) {
 	type productResult struct {
 		product *pb.Product
 		err     error
@@ -196,13 +230,15 @@ func (s *Service) prepOrderItems(ctx context.Context, items []*pb.CartItem, user
 	wg.Wait()
 
 	result := make([]*pb.OrderItem, len(items))
+	prods := make([]*pb.Product, len(items))
 	for i, r := range out {
 		if r.err != nil {
-			return nil, r.err
+			return nil, nil, r.err
 		}
 		result[i] = r.item
+		prods[i] = products[i].product
 	}
-	return result, nil
+	return result, prods, nil
 }
 
 func (s *Service) quoteShipping(ctx context.Context, address *pb.Address, items []*pb.CartItem) (*pb.Money, error) {

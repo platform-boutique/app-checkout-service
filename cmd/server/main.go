@@ -115,6 +115,18 @@ func run(port string) error {
 		return fmt.Errorf("connect to email: %w", connErr)
 	}
 
+	// Order storage is optional: without ORDER_SERVICE_ADDR checkout behaves as before
+	// (no order is stored). With it, storing the order is mandatory: if order-service
+	// cannot be reached PlaceOrder fails with Unavailable before the card is charged.
+	if addr := os.Getenv("ORDER_SERVICE_ADDR"); addr != "" {
+		if svc.OrderConn, connErr = dialGRPC(addr); connErr != nil {
+			return fmt.Errorf("connect to order-service: %w", connErr)
+		}
+		log.Infof("order storage enabled (order-service at %s)", addr)
+	} else {
+		log.Info("order storage disabled: ORDER_SERVICE_ADDR is not set, orders are not stored")
+	}
+
 	pb.RegisterCheckoutServiceServer(srv, svc)
 
 	healthSrv := health.NewServer()
