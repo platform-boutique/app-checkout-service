@@ -225,6 +225,24 @@ func TestSum(t *testing.T) {
 			want: usd(0, 0),
 		},
 		{
+			name: "both below one unit, no carry (0.1 + 0.2)",
+			l:    usd(0, 100000000),
+			r:    usd(0, 200000000),
+			want: usd(0, 300000000),
+		},
+		{
+			name: "both below one unit, carry (0.6 + 0.7)",
+			l:    usd(0, 600000000),
+			r:    usd(0, 700000000),
+			want: usd(1, 300000000),
+		},
+		{
+			name: "both negative below one unit (-0.1 + -0.2)",
+			l:    usd(0, -100000000),
+			r:    usd(0, -200000000),
+			want: usd(0, -300000000),
+		},
+		{
 			name: "cross-sign: positive units negative nanos carry",
 			l:    usd(2, 0),
 			r:    usd(0, -500000000),
@@ -288,6 +306,8 @@ func TestMultiplySlow(t *testing.T) {
 		{"multiply by 2", usd(3, 500000000), 2, usd(7, 0)},
 		{"multiply by 3", usd(1, 0), 3, usd(3, 0)},
 		{"nanos carry on multiply", usd(0, 500000000), 3, usd(1, 500000000)},
+		{"0.1 x 3 is exactly 0.3", usd(0, 100000000), 3, usd(0, 300000000)},
+		{"33.333333333 x 3", usd(33, 333333333), 3, usd(99, 999999999)},
 	}
 
 	for _, tt := range tests {
