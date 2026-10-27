@@ -7,11 +7,13 @@ import (
 	"testing"
 
 	pb "checkout-service/proto"
+	orderspb "checkout-service/proto/orders"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/proto"
 )
 
 // ─── Mock servers ────────────────────────────────────────────────────────────
@@ -41,12 +43,16 @@ func (m *mockCartServer) EmptyCart(_ context.Context, _ *pb.EmptyCartRequest) (*
 type mockProductCatalogServer struct {
 	pb.UnimplementedProductCatalogServiceServer
 	product *pb.Product
+	byID    map[string]*pb.Product // optional: per-id products, falls back to product
 	err     error
 }
 
-func (m *mockProductCatalogServer) GetProduct(_ context.Context, _ *pb.GetProductRequest) (*pb.Product, error) {
+func (m *mockProductCatalogServer) GetProduct(_ context.Context, req *pb.GetProductRequest) (*pb.Product, error) {
 	if m.err != nil {
 		return nil, m.err
+	}
+	if p, ok := m.byID[req.GetId()]; ok {
+		return proto.Clone(p).(*pb.Product), nil
 	}
 	return m.product, nil
 }
@@ -72,6 +78,8 @@ type mockShippingServer struct {
 	quoteErr   error
 	shipErr    error
 	trackingID string
+	quote      *pb.Money // optional shipping quote in USD, default 5.00
+	rec        *recorder
 
 	mu        sync.Mutex
 	shipCalls int
@@ -87,6 +95,9 @@ func (m *mockShippingServer) GetQuote(_ context.Context, _ *pb.GetQuoteRequest) 
 	if m.quoteErr != nil {
 		return nil, m.quoteErr
 	}
+	if m.quote != nil {
+		return &pb.GetQuoteResponse{CostUsd: proto.Clone(m.quote).(*pb.Money)}, nil
+	}
 	return &pb.GetQuoteResponse{
 		CostUsd: &pb.Money{CurrencyCode: "USD", Units: 5, Nanos: 0},
 	}, nil
@@ -96,6 +107,7 @@ func (m *mockShippingServer) ShipOrder(_ context.Context, _ *pb.ShipOrderRequest
 	m.mu.Lock()
 	m.shipCalls++
 	m.mu.Unlock()
+	m.rec.add("ShipOrder")
 	if m.shipErr != nil {
 		return nil, m.shipErr
 	}
@@ -112,6 +124,8 @@ type mockPaymentServer struct {
 	err           error
 	refundErr     error
 	transactionID string
+	rec           *recorder
+	onCharge      func() // optional hook run when a charge arrives (before it answers)
 
 	mu          sync.Mutex
 	chargeCalls int
@@ -134,6 +148,7 @@ func (m *mockPaymentServer) Refund(_ context.Context, req *pb.RefundRequest) (*p
 	m.mu.Lock()
 	m.refunds = append(m.refunds, req)
 	m.mu.Unlock()
+	m.rec.add("Refund")
 	if m.refundErr != nil {
 		return nil, m.refundErr
 	}
@@ -144,6 +159,10 @@ func (m *mockPaymentServer) Charge(_ context.Context, _ *pb.ChargeRequest) (*pb.
 	m.mu.Lock()
 	m.chargeCalls++
 	m.mu.Unlock()
+	m.rec.add("Charge")
+	if m.onCharge != nil {
+		m.onCharge()
+	}
 	if m.err != nil {
 		return nil, m.err
 	}
@@ -176,6 +195,7 @@ type mocks struct {
 	shipping       *mockShippingServer
 	payment        *mockPaymentServer
 	email          *mockEmailServer
+	orders         *mockOrderServer // nil: ORDER_SERVICE_ADDR unset
 }
 
 // startMockServers registers all mock gRPC servers on random ports and returns
@@ -208,6 +228,11 @@ func startMockServers(t *testing.T, m *mocks) (*Service, func()) {
 	shippingLis, shippingSrv := startOne(func(s *grpc.Server) { pb.RegisterShippingServiceServer(s, m.shipping) })
 	paymentLis, paymentSrv := startOne(func(s *grpc.Server) { pb.RegisterPaymentServiceServer(s, m.payment) })
 	emailLis, emailSrv := startOne(func(s *grpc.Server) { pb.RegisterEmailServiceServer(s, m.email) })
+	var orderSrv *grpc.Server
+	var orderLis net.Listener
+	if m.orders != nil {
+		orderLis, orderSrv = startOne(func(s *grpc.Server) { orderspb.RegisterOrderServiceServer(s, m.orders) })
+	}
 
 	svc := &Service{
 		CartConn:           dial(cartLis.Addr().String()),
@@ -218,7 +243,14 @@ func startMockServers(t *testing.T, m *mocks) (*Service, func()) {
 		EmailConn:          dial(emailLis.Addr().String()),
 	}
 
+	if m.orders != nil {
+		svc.OrderConn = dial(orderLis.Addr().String())
+	}
+
 	cleanup := func() {
+		if orderSrv != nil {
+			orderSrv.Stop()
+		}
 		cartSrv.Stop()
 		catalogSrv.Stop()
 		currencySrv.Stop()
