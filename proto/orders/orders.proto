@@ -1,0 +1,149 @@
+syntax = "proto3";
+
+// Package hipstershop.orders keeps the gRPC service name in the hipstershop family
+// (hipstershop.orders.OrderService) but is a package of its own, so a client that
+// also compiles demo.proto (checkout, frontend) does not get two messages called
+// hipstershop.Money / hipstershop.Address in one registry. Money and Address below have
+// exactly the same fields and numbers as the ones in demo.proto.
+package hipstershop.orders;
+
+import "google/protobuf/timestamp.proto";
+
+// Copied from order-service/proto/orders.proto; only go_package differs (own Go package in this repo).
+option go_package = "checkout-service/proto/orders";
+
+// OrderService stores the shop's orders and reports their tracking status.
+//
+// Life cycle: CreateOrder writes the order as PENDING (before payment and shipping),
+// ConfirmOrder turns it into PLACED once it was paid and shipped, FailOrder turns a
+// PENDING order into FAILED. After confirmation the status shown to clients advances
+// by itself with the age of the order (PLACED -> PROCESSING -> SHIPPED -> DELIVERED);
+// nothing is stored for that, it is computed on every read.
+service OrderService {
+  // CreateOrder stores a new order as PENDING. Idempotent by order_id: repeating the
+  // call with the same content returns the stored order, with different content
+  // it fails with ALREADY_EXISTS.
+  rpc CreateOrder(CreateOrderRequest) returns (Order);
+  // ConfirmOrder PENDING -> PLACED. Idempotent with the same tracking and transaction id.
+  rpc ConfirmOrder(ConfirmOrderRequest) returns (Order);
+  // FailOrder PENDING -> FAILED. Idempotent: an already FAILED order is returned unchanged.
+  rpc FailOrder(FailOrderRequest) returns (Order);
+  // GetOrder returns one order. With session_id/user_id set, the order must belong to it,
+  // otherwise NOT_FOUND (the same answer as for an unknown id, so ids cannot be probed).
+  rpc GetOrder(GetOrderRequest) returns (Order);
+  // ListOrders returns one page of the orders of ONE session or ONE user, newest first.
+  rpc ListOrders(ListOrdersRequest) returns (ListOrdersResponse);
+}
+
+enum OrderStatus {
+  ORDER_STATUS_UNSPECIFIED = 0; // never returned
+  ORDER_STATUS_PENDING = 1;     // created, not confirmed yet; never advances
+  ORDER_STATUS_PLACED = 2;      // confirmed (paid and shipped)
+  ORDER_STATUS_PROCESSING = 3;  // computed: ORDER_PROCESSING_AFTER after placement
+  ORDER_STATUS_SHIPPED = 4;     // computed: ORDER_SHIPPED_AFTER after placement
+  ORDER_STATUS_DELIVERED = 5;   // computed: ORDER_DELIVERED_AFTER after placement
+  ORDER_STATUS_FAILED = 6;      // checkout failed; never advances
+}
+
+// Same fields as hipstershop.Money. In this service: currency_code is three upper-case
+// letters, units >= 0 (unit_price and shipping_cost: at most 1,000,000,000; total: at most 200,000,000,000,000),
+// nanos 0..999,999,999. No negative amounts; unit_price and total must be > 0.
+message Money {
+  string currency_code = 1;
+  int64 units = 2;
+  int32 nanos = 3;
+}
+
+// Same fields as hipstershop.Address.
+message Address {
+  string street_address = 1;
+  string city = 2;
+  string state = 3;
+  string country = 4;
+  int32 zip_code = 5;
+}
+
+// One order line. name, unit_price and picture are SNAPSHOTS taken at checkout time:
+// the order keeps showing them even if the catalog changes later.
+message OrderItem {
+  string product_id = 1; // 1-128 characters
+  string name = 2;       // 1-200 characters
+  int32 quantity = 3;    // 1-1000
+  Money unit_price = 4;  // price of ONE unit, > 0
+  string picture = 5;    // 0-500 characters (URL or path)
+}
+
+message CreateOrderRequest {
+  string order_id = 1;            // client-supplied, 1-64 characters of [A-Za-z0-9._-], starting with a letter or digit
+  string session_id = 2;          // 1-128 characters; owner while there are no accounts
+  string user_id = 3;             // optional, 0-128 characters; reserved for the accounts slice
+  string email = 4;               // 3-254 characters, plain address (no display name)
+  Address shipping_address = 5;   // street 1-200, city 1-100, state 0-100, country 1-100, zip_code >= 0
+  repeated OrderItem items = 6;   // 1-100 lines
+  Money shipping_cost = 7;        // optional (unset = zero in the order currency)
+  Money total = 8;                // must equal sum(quantity * unit_price) + shipping_cost, same currency everywhere
+}
+
+message ConfirmOrderRequest {
+  string order_id = 1;
+  string shipping_tracking_id = 2;     // 1-128 characters, from shipping-service
+  string payment_transaction_id = 3;   // 1-128 characters, from payment-service
+}
+
+message FailOrderRequest {
+  string order_id = 1;
+  string reason = 2; // 1-500 characters
+}
+
+message GetOrderRequest {
+  string order_id = 1;
+  string session_id = 2; // optional guard: if set, must be the order's session_id
+  string user_id = 3;    // optional guard: if set, must be the order's user_id
+}
+
+message ListOrdersRequest {
+  // Exactly one of session_id and user_id must be set.
+  string session_id = 1;
+  string user_id = 2;
+  int32 page = 3;      // 1-based; 0 means 1
+  int32 page_size = 4; // 0 means 10; values above 50 are capped at 50
+  // When true only orders that were confirmed (PLACED and later) are returned,
+  // i.e. no PENDING and no FAILED ones. This is what an order-history page wants.
+  bool placed_only = 5;
+}
+
+message ListOrdersResponse {
+  repeated Order orders = 1;
+  int32 total = 2; // all matching orders, not just this page
+}
+
+message Order {
+  string order_id = 1;
+  string session_id = 2;
+  string user_id = 3;
+  string email = 4;
+  Address shipping_address = 5;
+  repeated OrderItem items = 6;
+  Money shipping_cost = 7; // always set
+  Money total = 8;         // always set
+
+  // COMPUTED on every read from the stored state and the age since confirmation.
+  OrderStatus status = 9;
+  string failure_reason = 10;          // only for FAILED
+  string shipping_tracking_id = 11;    // empty until confirmed
+  string payment_transaction_id = 12;  // empty until confirmed
+
+  // Tracker timestamps. placed_at is the confirmation time; the other three are the moments
+  // the status becomes PROCESSING / SHIPPED / DELIVERED (placed_at plus the configured offsets)
+  // and are in the future while the status has not reached them. All four are unset for PENDING
+  // and FAILED orders. A UI draws the stage as reached when status is at or past it.
+  google.protobuf.Timestamp created_at = 13;
+  google.protobuf.Timestamp placed_at = 14;
+  google.protobuf.Timestamp processing_at = 15;
+  google.protobuf.Timestamp shipped_at = 16;
+  google.protobuf.Timestamp delivered_at = 17;
+  google.protobuf.Timestamp failed_at = 18; // only for FAILED
+  // The server clock the status was computed with; compare the stage timestamps against
+  // this one rather than against the browser clock.
+  google.protobuf.Timestamp evaluated_at = 19;
+}
