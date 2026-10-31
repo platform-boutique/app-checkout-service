@@ -146,4 +146,11 @@ message Order {
   // The server clock the status was computed with; compare the stage timestamps against
   // this one rather than against the browser clock.
   google.protobuf.Timestamp evaluated_at = 19;
+
+  // Set ONLY on CreateOrder responses: true for the call that inserted this order (decided by the INSERT itself,
+  // so it is race-safe), false for the idempotent replay. Every other RPC leaves it unset. It is declared
+  // `optional` (field presence) on purpose: an older server never sets it, and a client must be able to tell
+  // "false" (the order already existed) from "not sent" (unknown); a plain proto3 bool cannot. The wire
+  // format is the same as for a plain bool.
+  optional bool created = 20;
 }

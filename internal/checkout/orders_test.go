@@ -17,6 +17,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/proto"
 )
 
 // recorder keeps the order in which the downstream calls arrive. The nil recorder
@@ -50,8 +51,18 @@ type mockOrderServer struct {
 
 	createErr  error
 	confirmErr error
-	failErr    error
-	getErr     error
+	// confirmFailures: the first N ConfirmOrder calls fail with Unavailable, later ones work.
+	confirmFailures int
+	failErr         error
+	getErr          error
+
+	// omitCreated simulates an order-service that predates Order.created (it never sets the field).
+	omitCreated bool
+	// getMisses: the first N GetOrder calls answer NOT_FOUND although the order exists (the
+	// window in which another replica creates the order between the lookup and CreateOrder).
+	getMisses int
+	// onGetMiss, when set, runs before such an answer (tests use it as a barrier).
+	onGetMiss func()
 
 	mu       sync.Mutex
 	stored   map[string]*orderspb.Order // what CreateOrder/ConfirmOrder/FailOrder keep, served by GetOrder
@@ -96,12 +107,23 @@ func (m *mockOrderServer) CreateOrder(_ context.Context, req *orderspb.CreateOrd
 	return m.create(req), nil
 }
 
+// answer is a copy of the stored order with Created set the way the real order-service does
+// (present on CreateOrder answers) unless omitCreated simulates an old server. Caller holds m.mu.
+func (m *mockOrderServer) answer(o *orderspb.Order, created bool) *orderspb.Order {
+	out := proto.Clone(o).(*orderspb.Order)
+	if !m.omitCreated {
+		out.Created = &created
+	}
+	return out
+}
+
 // create stores the order PENDING, or returns the stored one (CreateOrder is idempotent by order id).
+// Check-and-insert is one critical section, so of N concurrent calls exactly one reports created=true.
 func (m *mockOrderServer) create(req *orderspb.CreateOrderRequest) *orderspb.Order {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if o, ok := m.stored[req.GetOrderId()]; ok {
-		return o
+		return m.answer(o, false)
 	}
 	if m.stored == nil {
 		m.stored = map[string]*orderspb.Order{}
@@ -112,7 +134,7 @@ func (m *mockOrderServer) create(req *orderspb.CreateOrderRequest) *orderspb.Ord
 		Status: orderspb.OrderStatus_ORDER_STATUS_PENDING,
 	}
 	m.stored[req.GetOrderId()] = o
-	return o
+	return m.answer(o, true)
 }
 
 // settle moves a stored PENDING order to its final state (no-op for unknown ids).
@@ -133,6 +155,15 @@ func (m *mockOrderServer) GetOrder(_ context.Context, req *orderspb.GetOrderRequ
 		return nil, m.getErr
 	}
 	m.mu.Lock()
+	if m.getMisses > 0 {
+		m.getMisses--
+		hook := m.onGetMiss
+		m.mu.Unlock()
+		if hook != nil {
+			hook()
+		}
+		return nil, status.Error(codes.NotFound, "order not found")
+	}
 	defer m.mu.Unlock()
 	o, ok := m.stored[req.GetOrderId()]
 	if !ok || (req.GetSessionId() != "" && req.GetSessionId() != o.GetSessionId()) || (req.GetUserId() != "" && req.GetUserId() != o.GetUserId()) {
@@ -145,7 +176,11 @@ func (m *mockOrderServer) ConfirmOrder(_ context.Context, req *orderspb.ConfirmO
 	m.rec.add("ConfirmOrder")
 	m.mu.Lock()
 	m.confirms = append(m.confirms, req)
+	n := len(m.confirms)
 	m.mu.Unlock()
+	if n <= m.confirmFailures {
+		return nil, status.Error(codes.Unavailable, "blip")
+	}
 	if m.confirmErr != nil {
 		return nil, m.confirmErr
 	}
@@ -483,7 +518,8 @@ func TestOrders_ConfirmFails_SuccessReturned_ErrorLogged(t *testing.T) {
 	if orderID == "" || resp.GetOrder().GetShippingTrackingId() != "TRACK-123" {
 		t.Errorf("order result = %v", resp.GetOrder())
 	}
-	assertEvents(t, m, "CreateOrder", "Charge", "ShipOrder", "ConfirmOrder")
+	// 3 attempts, all failing; the original flow is unchanged
+	assertEvents(t, m, "CreateOrder", "Charge", "ShipOrder", "ConfirmOrder", "ConfirmOrder", "ConfirmOrder")
 	if len(m.payment.refundRequests()) != 0 {
 		t.Error("refunded although the order was shipped")
 	}
@@ -494,7 +530,7 @@ func TestOrders_ConfirmFails_SuccessReturned_ErrorLogged(t *testing.T) {
 		t.Errorf("cart emptied %d, emails %d, want 1/1", m.cart.emptyCalls, m.email.calls)
 	}
 	out := logs.String()
-	for _, want := range []string{"level=error", "ORDER NOT CONFIRMED", orderID, "TX-CONF"} {
+	for _, want := range []string{"level=error", "ORDER NOT CONFIRMED order=" + orderID, "TX-CONF"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("log lacks %q:\n%s", want, out)
 		}

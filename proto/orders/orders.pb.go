@@ -737,7 +737,13 @@ type Order struct {
 	FailedAt     *timestamppb.Timestamp `protobuf:"bytes,18,opt,name=failed_at,json=failedAt,proto3" json:"failed_at,omitempty"` // only for FAILED
 	// The server clock the status was computed with; compare the stage timestamps against
 	// this one rather than against the browser clock.
-	EvaluatedAt   *timestamppb.Timestamp `protobuf:"bytes,19,opt,name=evaluated_at,json=evaluatedAt,proto3" json:"evaluated_at,omitempty"`
+	EvaluatedAt *timestamppb.Timestamp `protobuf:"bytes,19,opt,name=evaluated_at,json=evaluatedAt,proto3" json:"evaluated_at,omitempty"`
+	// Set ONLY on CreateOrder responses: true for the call that inserted this order (decided by the INSERT itself,
+	// so it is race-safe), false for the idempotent replay. Every other RPC leaves it unset. It is declared
+	// `optional` (field presence) on purpose: an older server never sets it, and a client must be able to tell
+	// "false" (the order already existed) from "not sent" (unknown); a plain proto3 bool cannot. The wire
+	// format is the same as for a plain bool.
+	Created       *bool `protobuf:"varint,20,opt,name=created,proto3,oneof" json:"created,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -905,6 +911,13 @@ func (x *Order) GetEvaluatedAt() *timestamppb.Timestamp {
 	return nil
 }
 
+func (x *Order) GetCreated() bool {
+	if x != nil && x.Created != nil {
+		return *x.Created
+	}
+	return false
+}
+
 var File_proto_orders_orders_proto protoreflect.FileDescriptor
 
 const file_proto_orders_orders_proto_rawDesc = "" +
@@ -960,7 +973,7 @@ const file_proto_orders_orders_proto_rawDesc = "" +
 	"placedOnly\"]\n" +
 	"\x12ListOrdersResponse\x121\n" +
 	"\x06orders\x18\x01 \x03(\v2\x19.hipstershop.orders.OrderR\x06orders\x12\x14\n" +
-	"\x05total\x18\x02 \x01(\x05R\x05total\"\xcd\a\n" +
+	"\x05total\x18\x02 \x01(\x05R\x05total\"\xf8\a\n" +
 	"\x05Order\x12\x19\n" +
 	"\border_id\x18\x01 \x01(\tR\aorderId\x12\x1d\n" +
 	"\n" +
@@ -984,7 +997,10 @@ const file_proto_orders_orders_proto_rawDesc = "" +
 	"shipped_at\x18\x10 \x01(\v2\x1a.google.protobuf.TimestampR\tshippedAt\x12=\n" +
 	"\fdelivered_at\x18\x11 \x01(\v2\x1a.google.protobuf.TimestampR\vdeliveredAt\x127\n" +
 	"\tfailed_at\x18\x12 \x01(\v2\x1a.google.protobuf.TimestampR\bfailedAt\x12=\n" +
-	"\fevaluated_at\x18\x13 \x01(\v2\x1a.google.protobuf.TimestampR\vevaluatedAt*\xca\x01\n" +
+	"\fevaluated_at\x18\x13 \x01(\v2\x1a.google.protobuf.TimestampR\vevaluatedAt\x12\x1d\n" +
+	"\acreated\x18\x14 \x01(\bH\x00R\acreated\x88\x01\x01B\n" +
+	"\n" +
+	"\b_created*\xca\x01\n" +
 	"\vOrderStatus\x12\x1c\n" +
 	"\x18ORDER_STATUS_UNSPECIFIED\x10\x00\x12\x18\n" +
 	"\x14ORDER_STATUS_PENDING\x10\x01\x12\x17\n" +
@@ -1070,6 +1086,7 @@ func file_proto_orders_orders_proto_init() {
 	if File_proto_orders_orders_proto != nil {
 		return
 	}
+	file_proto_orders_orders_proto_msgTypes[9].OneofWrappers = []any{}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{

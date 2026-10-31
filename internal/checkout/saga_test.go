@@ -93,6 +93,7 @@ func sagaMocks() *mocks {
 func init() {
 	// Fast retries in tests.
 	stockBackoff = []time.Duration{time.Millisecond, time.Millisecond}
+	confirmBackoff = []time.Duration{time.Millisecond, time.Millisecond}
 }
 
 func placeKeyed(svc *Service, key string) (*pb.PlaceOrderResponse, error) {

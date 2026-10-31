@@ -18,8 +18,8 @@ Package `hipstershop`, service `CheckoutService` ([`proto/checkout.proto`](https
 8. **Only if `INVENTORY_SERVICE_ADDR` is set:** `inventory-service.Reserve(order_id, lines)` holds the stock, all or nothing (see [Stock reservation](#stock-reservation)). A shortage is `FAILED_PRECONDITION`, an unreachable inventory is `UNAVAILABLE`; either way the order is marked `FAILED` and nothing is charged.
 9. `payment-service.Charge(total, credit_card)` - failure aborts the order: `Release` the stock, mark the order `FAILED` (nothing is shipped, emptied or mailed).
 10. `shipping-service.ShipOrder`. If it fails, the charge is **compensated** in this order: `payment-service.Refund(transaction_id, total)` is called once (on a context detached from the caller, 10 s timeout), then `Release` of the stock, then `FailOrder`; the shipping error is returned with the note "your payment has been refunded". If the refund itself fails, the original error is kept, the failure is logged at error level with the transaction id, and the message says the refund is pending (with the transaction id as reference).
-11. **Only with inventory:** `inventory-service.Commit(order_id)`, 3 attempts with a short backoff, on a detached context. If it still fails the order goes on and `STOCK NOT COMMITTED order=<id>` is logged at error level (known gap).
-12. **Only with order storage:** `order-service.ConfirmOrder(order_id, tracking_id, transaction_id)`; the order becomes `PLACED`.
+11. **Only with inventory:** `inventory-service.Commit(order_id)`, 3 attempts (3 s each, pauses of 1 s then 3 s), on a detached context. If it still fails the order goes on and `STOCK NOT COMMITTED order=<id>` is logged at error level (known gap).
+12. **Only with order storage:** `order-service.ConfirmOrder(order_id, tracking_id, transaction_id)`; the order becomes `PLACED`. 3 attempts (3 s each, pauses of 0.5 s then 2 s) on a detached context; a final answer (`FAILED_PRECONDITION`, `NOT_FOUND`, `INVALID_ARGUMENT`) is not retried. If every attempt fails the order goes on, `ORDER NOT CONFIRMED order=<id>` is logged at error level and the order stays `PENDING` (known gap).
 13. `cart-service.EmptyCart` - error ignored.
 14. `email-service.SendOrderConfirmation` - error logged, **never fails the order**.
 
@@ -67,7 +67,7 @@ Optional, switched on by `ORDER_SERVICE_ADDR` (for example `order-service:8085`)
 | `CreateOrder` any other code (`INVALID_ARGUMENT`, `ALREADY_EXISTS`, ...) | `CreateOrder` only | `INTERNAL`; logged at error level with the detail (a checkout bug), nothing charged |
 | Card declined or any `Charge` error | `CreateOrder`, `Charge`, `FailOrder` | the mapped payment error; `FailOrder` reason = that message |
 | `ShipOrder` fails | `CreateOrder`, `Charge`, `ShipOrder`, `Refund`, `FailOrder` | the mapped shipping error + refund note; reason = that message |
-| `ConfirmOrder` fails after charge and shipment | `CreateOrder`, `Charge`, `ShipOrder`, `ConfirmOrder` | **success**; logged at error level (`ORDER NOT CONFIRMED`) with order id, transaction id and tracking id; the order stays `PENDING` for manual follow-up |
+| `ConfirmOrder` fails after charge and shipment | `CreateOrder`, `Charge`, `ShipOrder`, `ConfirmOrder` x3 | **success**; `ConfirmOrder` is tried 3 times, then `ORDER NOT CONFIRMED order=<id>` is logged at error level (with transaction id and tracking id); the order stays `PENDING` for manual follow-up |
 | `FailOrder` fails | as above | the original error is returned unchanged; the `FailOrder` error is logged (the order stays `PENDING`) |
 
 Details:
@@ -97,7 +97,7 @@ Optional, switched on by `INVENTORY_SERVICE_ADDR` (for example `inventory-servic
 | `Commit` fails 3 times | `..., ShipOrder`, `Commit` x3, `ConfirmOrder` | **success**; `STOCK NOT COMMITTED order=<id>` logged at error level |
 | `Release` fails | as above | the original error, unchanged; `STOCK NOT RELEASED` logged (3 attempts; the hold then expires by the TTL of inventory-service) |
 
-`Release` and `Commit` run on a context detached from the caller (5 s per attempt), so a customer who closed the tab while the card was being charged does not leave stock held (or sold but uncommitted). `Reserve` runs on the request context with a 5 s timeout.
+`Release` (5 s per attempt) and `Commit` (3 s per attempt) run on a context detached from the caller, so a customer who closed the tab while the card was being charged does not leave stock held (or sold but uncommitted). `Reserve` runs on the request context with a 5 s timeout.
 
 ### Idempotency
 
@@ -105,6 +105,7 @@ Optional, switched on by `INVENTORY_SERVICE_ADDR` (for example `inventory-servic
 
 - The order id is `UUIDv5(fixed namespace, owner + "\x00" + key)`, owner = `account_id` when set, else `user_id` (the cart key), so two visitors using the same key never collide.
 - Before anything else `GetOrder(order_id)` is called. Not found: a new attempt, the normal flow (`CreateOrder` is idempotent by order id). `PLACED` or later (`PROCESSING`, `SHIPPED`, `DELIVERED`): the stored result is returned (`order_id`, tracking id, shipping cost and address, lines with quantity and unit price) **without** charging, reserving, shipping, emptying the cart or sending the email again; it does not depend on the cart (which was emptied). `PENDING`: `ABORTED` `this order is already being processed`. `FAILED`: `FAILED_PRECONDITION` `this attempt failed, start the checkout again`; a new attempt needs a **new key**.
+- Two replicas receiving the same key at the same moment: both lookups can miss, but `CreateOrder` (order-service with `Order.created`) answers `created = false` to all but the one that inserted the row; that call takes the same branches as the lookup above (`PENDING` -> `ABORTED`, `PLACED` or later -> stored result, `FAILED` -> `FAILED_PRECONDITION`) and reserves, charges and ships nothing. An order-service that does not send the field (unset = unknown) leaves this race open, see [Known limitations](#known-limitations).
 - The same key arriving twice at once in one checkout process: the second call gets `ABORTED` immediately (in-memory guard), exactly one charge. After the first finished, the same key replays the stored order.
 - A lookup failure (order-service down) is `UNAVAILABLE`: checkout does not guess.
 - An order stuck `PENDING` (a crash, `FailOrder` or `ConfirmOrder` failing) answers `ABORTED` for its key forever; the customer needs a new key and the order needs manual follow-up.

@@ -23,15 +23,18 @@ import (
 //	CreateOrder  (PENDING)          failure -> nothing is charged
 //	Charge                          failure -> FailOrder
 //	ShipOrder                       failure -> Refund, FailOrder
-//	ConfirmOrder (PLACED)           failure -> logged, the customer still gets the success
+//	ConfirmOrder (PLACED)           3 attempts; still failing -> logged (ORDER NOT CONFIRMED), the customer still gets the success
 //	empty cart, confirmation email
 const (
 	// createOrderTimeout bounds CreateOrder (it runs on the caller's context).
 	createOrderTimeout = 5 * time.Second
-	// settleOrderTimeout bounds FailOrder and ConfirmOrder. They run on a context
-	// detached from the caller's, so a caller that gave up does not leave the
-	// order PENDING after the money moved.
+	// settleOrderTimeout bounds FailOrder. It runs on a context detached from the
+	// caller's, so a caller that gave up does not leave the order PENDING.
 	settleOrderTimeout = 10 * time.Second
+	// confirmTimeout bounds ONE attempt of ConfirmOrder (also on a detached context).
+	confirmTimeout = 3 * time.Second
+	// confirmAttempts is the number of tries of ConfirmOrder.
+	confirmAttempts = 3
 
 	// Limits of order-service (proto/orders/orders.proto) that checkout can hit
 	// with data a customer controls. Checked up front so the customer gets a
@@ -51,6 +54,10 @@ const (
 	maxPictureLen   = 500
 	maxReasonLen    = 500
 )
+
+// confirmBackoff is the pause before the 2nd and 3rd attempt of ConfirmOrder (a variable so tests are fast).
+// Worst case with a hanging order-service: 3 x 3 s + 0.5 s + 2 s = 11.5 s.
+var confirmBackoff = []time.Duration{500 * time.Millisecond, 2 * time.Second}
 
 func (s *Service) ordersEnabled() bool { return s.OrderConn != nil }
 
@@ -98,32 +105,42 @@ func checkOrderLimits(prep orderPrep) error {
 	return nil
 }
 
-// createOrder stores the order as PENDING. The error is the status PlaceOrder
-// returns: Unavailable stays Unavailable, everything else (including
-// InvalidArgument, which means checkout built a bad request) is Internal.
-func (s *Service) createOrder(ctx context.Context, orderID string, req *pb.PlaceOrderRequest, prep orderPrep, total *pb.Money) error {
+// createOrder stores the order as PENDING and returns the order as order-service
+// answered it (its Created field says whether THIS call inserted it, see
+// alreadyExisted). The error is the status PlaceOrder returns: Unavailable stays
+// Unavailable, everything else (including InvalidArgument, which means checkout
+// built a bad request) is Internal.
+func (s *Service) createOrder(ctx context.Context, orderID string, req *pb.PlaceOrderRequest, prep orderPrep, total *pb.Money) (*orderspb.Order, error) {
 	ctx, cancel := context.WithTimeout(ctx, createOrderTimeout)
 	defer cancel()
-	_, err := orderspb.NewOrderServiceClient(s.OrderConn).CreateOrder(ctx, buildCreateOrder(orderID, req, prep, total))
+	o, err := orderspb.NewOrderServiceClient(s.OrderConn).CreateOrder(ctx, buildCreateOrder(orderID, req, prep, total))
 	if err == nil {
-		return nil
+		return o, nil
 	}
 	fields := log.WithField("order_id", orderID)
 	switch c := status.Code(err); c {
 	case codes.Unavailable, codes.DeadlineExceeded, codes.ResourceExhausted, codes.Canceled:
 		fields.Warnf("[PlaceOrder] CreateOrder failed, nothing was charged: %v", err)
-		return toStatus(newCallError("order", err))
+		return nil, toStatus(newCallError("order", err))
 	case codes.AlreadyExists:
 		if req.GetIdempotencyKey() != "" {
 			// Same key, different content: another replica created the order meanwhile.
 			fields.Warnf("[PlaceOrder] CreateOrder: order exists with different content (same idempotency key), nothing was charged: %v", err)
-			return errAlreadyProcessing()
+			return nil, errAlreadyProcessing()
 		}
 		fallthrough
 	default:
 		fields.Errorf("[PlaceOrder] CreateOrder rejected the order (checkout bug or contract mismatch), nothing was charged: %v", err)
-		return internalErr()
+		return nil, internalErr()
 	}
+}
+
+// alreadyExisted reports whether a CreateOrder answer says that the order was already
+// there (an earlier attempt or another replica inserted it): the field is present and
+// false. An order-service that does not send Order.created leaves it unset, which is
+// "unknown", not "existed": the caller then relies on the GetOrder lookup alone.
+func alreadyExisted(o *orderspb.Order) bool {
+	return o != nil && o.Created != nil && !o.GetCreated()
 }
 
 // failOrder marks the order FAILED after a failure past CreateOrder. cause is the
@@ -146,26 +163,37 @@ func (s *Service) failOrder(ctx context.Context, orderID string, cause error) {
 	}
 }
 
-// confirmOrder marks the order PLACED after the charge and the shipment worked.
-// A failure here is only logged: the money is taken and the parcel is ordered,
-// so PlaceOrder still reports success and the order stays PENDING for manual follow-up.
+// confirmOrder marks the order PLACED after the charge and the shipment worked:
+// confirmAttempts tries with confirmBackoff between them, each on a context detached
+// from the caller's (a customer who closed the tab must not leave a paid order PENDING).
+// If every attempt fails it is only logged (ORDER NOT CONFIRMED order=<id>): the money
+// is taken and the parcel is ordered, so PlaceOrder still reports success and the order
+// stays PENDING for manual follow-up (nothing retries it later, see docs/limitations.md).
+// FAILED_PRECONDITION and NOT_FOUND are final answers and are not retried.
 func (s *Service) confirmOrder(ctx context.Context, orderID, trackingID, txID string) {
 	if !s.ordersEnabled() {
 		return
 	}
-	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), settleOrderTimeout)
-	defer cancel()
-	_, err := orderspb.NewOrderServiceClient(s.OrderConn).ConfirmOrder(ctx, &orderspb.ConfirmOrderRequest{
-		OrderId:              orderID,
-		ShippingTrackingId:   trackingID,
-		PaymentTransactionId: txID,
+	ctx = context.WithoutCancel(ctx)
+	err := retry(confirmAttempts, confirmBackoff, func() error {
+		actx, cancel := context.WithTimeout(ctx, confirmTimeout)
+		defer cancel()
+		_, err := orderspb.NewOrderServiceClient(s.OrderConn).ConfirmOrder(actx, &orderspb.ConfirmOrderRequest{
+			OrderId:              orderID,
+			ShippingTrackingId:   trackingID,
+			PaymentTransactionId: txID,
+		})
+		return err
+	}, func(err error) bool {
+		c := status.Code(err)
+		return c != codes.FailedPrecondition && c != codes.NotFound && c != codes.InvalidArgument
 	})
 	if err != nil {
 		log.WithFields(logrus.Fields{
 			"order_id":       orderID,
 			"transaction_id": txID,
 			"tracking_id":    trackingID,
-		}).Errorf("ORDER NOT CONFIRMED: the customer was charged and the parcel is ordered, but ConfirmOrder failed, the order stays PENDING and needs manual follow-up: %v", err)
+		}).Errorf("ORDER NOT CONFIRMED order=%s: the customer was charged and the parcel is ordered, but ConfirmOrder failed %d times, the order stays PENDING and needs manual follow-up: %v", orderID, confirmAttempts, err)
 	}
 }
 

@@ -114,8 +114,15 @@ func (s *Service) PlaceOrder(ctx context.Context, req *pb.PlaceOrderRequest) (*p
 		}
 	}
 	if s.ordersEnabled() {
-		if err := s.createOrder(ctx, orderID, req, prep, total); err != nil {
+		created, err := s.createOrder(ctx, orderID, req, prep, total)
+		if err != nil {
 			return nil, err
+		}
+		if req.GetIdempotencyKey() != "" && alreadyExisted(created) {
+			// Another replica (or an earlier attempt) inserted this order between our
+			// GetOrder lookup and CreateOrder: its state decides, we must not proceed.
+			log.WithField("order_id", orderID).Info("[PlaceOrder] CreateOrder says the order already existed, nothing is reserved or charged")
+			return replayFromOrder(orderID, created)
 		}
 	}
 
@@ -149,8 +156,8 @@ func (s *Service) PlaceOrder(ctx context.Context, req *pb.PlaceOrderRequest) (*p
 	// Charged and shipped: the stock is sold. A failure is only logged.
 	s.commitStock(ctx, orderID)
 
-	// Charged and shipped: the order is PLACED. A failure here is only logged
-	// (the customer must not see an error for a purchase that went through).
+	// Charged and shipped: the order is PLACED (3 attempts). A failure here is only
+	// logged (the customer must not see an error for a purchase that went through).
 	s.confirmOrder(ctx, orderID, shippingTrackingID, txID)
 
 	_ = s.emptyUserCart(ctx, req.UserId)

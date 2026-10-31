@@ -34,6 +34,9 @@ const (
 	// detached from the caller's: a customer who closed the tab must neither leave
 	// stock held (Release) nor sold-but-uncommitted (Commit).
 	stockTimeout = 5 * time.Second
+	// commitTimeout bounds ONE attempt of Commit (a small write; kept short so that the
+	// three patient attempts stay near the 15 s the frontend waits for PlaceOrder).
+	commitTimeout = 3 * time.Second
 	// stockAttempts is the number of tries of Commit and Release.
 	stockAttempts = 3
 
@@ -42,7 +45,9 @@ const (
 )
 
 // stockBackoff is the pause before the 2nd and 3rd attempt of Commit / Release (a variable so tests are fast).
-var stockBackoff = []time.Duration{100 * time.Millisecond, 300 * time.Millisecond}
+// Patient on purpose: a restarting inventory-service is back within a few seconds. Worst case of Commit with a
+// hanging service: 3 x 3 s + 1 s + 3 s = 13 s (Release: 3 x 5 s + 4 s, it runs on the failure path only).
+var stockBackoff = []time.Duration{1 * time.Second, 3 * time.Second}
 
 func (s *Service) inventoryEnabled() bool { return s.InventoryConn != nil }
 
@@ -159,7 +164,7 @@ func (s *Service) releaseStock(ctx context.Context, orderID string) {
 		return
 	}
 	ctx = context.WithoutCancel(ctx)
-	err := retryStock(func() error {
+	err := retry(stockAttempts, stockBackoff, func() error {
 		actx, cancel := context.WithTimeout(ctx, stockTimeout)
 		defer cancel()
 		_, err := s.inventory().Release(actx, &inventorypb.ReleaseRequest{OrderId: orderID})
@@ -179,8 +184,8 @@ func (s *Service) commitStock(ctx context.Context, orderID string) {
 		return
 	}
 	ctx = context.WithoutCancel(ctx)
-	err := retryStock(func() error {
-		actx, cancel := context.WithTimeout(ctx, stockTimeout)
+	err := retry(stockAttempts, stockBackoff, func() error {
+		actx, cancel := context.WithTimeout(ctx, commitTimeout)
 		defer cancel()
 		_, err := s.inventory().Commit(actx, &inventorypb.CommitRequest{OrderId: orderID})
 		return err
@@ -190,13 +195,13 @@ func (s *Service) commitStock(ctx context.Context, orderID string) {
 	}
 }
 
-// retryStock runs op up to stockAttempts times with stockBackoff between the tries.
-// retryable decides whether an error is worth another attempt.
-func retryStock(op func() error, retryable func(error) bool) error {
+// retry runs op up to attempts times with backoff between the tries (backoff[i-1] before
+// attempt i+1, the last entry repeats). retryable decides whether an error is worth another attempt.
+func retry(attempts int, backoff []time.Duration, op func() error, retryable func(error) bool) error {
 	var err error
-	for i := 0; i < stockAttempts; i++ {
-		if i > 0 {
-			time.Sleep(stockBackoff[min(i-1, len(stockBackoff)-1)])
+	for i := 0; i < attempts; i++ {
+		if i > 0 && len(backoff) > 0 {
+			time.Sleep(backoff[min(i-1, len(backoff)-1)])
 		}
 		if err = op(); err == nil {
 			return nil

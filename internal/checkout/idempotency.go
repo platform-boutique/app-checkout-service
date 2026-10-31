@@ -28,9 +28,12 @@ import (
 //
 // The same key arriving twice at once in this process is stopped by an in-memory
 // guard (ABORTED, like PENDING). Between several checkout replicas the guard does
-// not exist: CreateOrder does not say whether it created the order, so two replicas
-// receiving the same key within the same few milliseconds could both proceed
-// (known gap, see docs/limitations.md).
+// not exist, so the lookup above can miss an order that another replica creates a
+// moment later. That race is closed by CreateOrder itself: order-service (versions
+// that send Order.created) answers created=false to every caller but the one that
+// inserted the row, and then the stored order decides exactly as above (see
+// replayFromOrder), nothing is reserved, charged or shipped. An order-service that
+// does not send the field leaves the race open (known gap, docs/limitations.md).
 
 const maxIdempotencyKeyLen = 64
 
@@ -107,6 +110,15 @@ func (s *Service) replayStoredOrder(ctx context.Context, orderID string, req *pb
 			return nil, internalErr()
 		}
 	}
+	return replayFromOrder(orderID, o)
+}
+
+// replayFromOrder decides what a request does when its order already exists, from the
+// stored order: PLACED and later -> (stored result, nil); PENDING -> ABORTED;
+// FAILED -> FAILED_PRECONDITION. It never returns (nil, nil). Used by the GetOrder-first
+// lookup and by the created=false answer of CreateOrder.
+func replayFromOrder(orderID string, o *orderspb.Order) (*pb.PlaceOrderResponse, error) {
+	fields := log.WithField("order_id", orderID)
 	switch o.GetStatus() {
 	case orderspb.OrderStatus_ORDER_STATUS_PLACED, orderspb.OrderStatus_ORDER_STATUS_PROCESSING,
 		orderspb.OrderStatus_ORDER_STATUS_SHIPPED, orderspb.OrderStatus_ORDER_STATUS_DELIVERED:
