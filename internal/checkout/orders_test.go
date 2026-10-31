@@ -503,6 +503,7 @@ func TestOrders_Validation_NothingStored(t *testing.T) {
 		"display name":  func(r *pb.PlaceOrderRequest) { r.Email = "Ada <ada@example.com>" },
 		"no at":         func(r *pb.PlaceOrderRequest) { r.Email = "ada.example.com" },
 		"long user id":  func(r *pb.PlaceOrderRequest) { r.UserId = strings.Repeat("u", 129) },
+		"long account":  func(r *pb.PlaceOrderRequest) { r.AccountId = strings.Repeat("a", 129) },
 		"empty street":  func(r *pb.PlaceOrderRequest) { r.Address.StreetAddress = " " },
 		"long city":     func(r *pb.PlaceOrderRequest) { r.Address.City = strings.Repeat("c", 101) },
 		"negative zip":  func(r *pb.PlaceOrderRequest) { r.Address.ZipCode = -1 },
@@ -524,6 +525,86 @@ func TestOrders_Validation_NothingStored(t *testing.T) {
 				t.Error("charged")
 			}
 		})
+	}
+}
+
+// A signed-in buyer: account_id becomes CreateOrder.user_id, the cart key (user_id) stays the session_id.
+func TestOrders_AccountID_BecomesOrderUserID(t *testing.T) {
+	m := ordersMocks()
+	svc, cleanup := startMockServers(t, m)
+	defer cleanup()
+
+	_, err := svc.PlaceOrder(context.Background(), &pb.PlaceOrderRequest{
+		UserId: "cart-key-1", AccountId: "9b2f6a1e-0c3d-4e5f-8a7b-1c2d3e4f5a6b", UserCurrency: "USD",
+		Address: defaultAddress(), Email: "user@example.com", CreditCard: defaultCard(),
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	assertEvents(t, m, "CreateOrder", "Charge", "ShipOrder", "ConfirmOrder")
+	create := m.orders.creates[0]
+	if create.GetUserId() != "9b2f6a1e-0c3d-4e5f-8a7b-1c2d3e4f5a6b" || create.GetSessionId() != "cart-key-1" {
+		t.Errorf("CreateOrder user_id/session_id = %q/%q", create.GetUserId(), create.GetSessionId())
+	}
+	if m.cart.emptyCalls != 1 {
+		t.Errorf("the cart (keyed by user_id) was emptied %d times, want 1", m.cart.emptyCalls)
+	}
+}
+
+// Anonymous: no account_id gives an empty user_id (also when it is only whitespace); the limit itself is accepted.
+func TestOrders_NoAccountID_AnonymousOrder(t *testing.T) {
+	for name, account := range map[string]string{"empty": "", "blank": "   "} {
+		t.Run(name, func(t *testing.T) {
+			m := ordersMocks()
+			svc, cleanup := startMockServers(t, m)
+			defer cleanup()
+			_, err := svc.PlaceOrder(context.Background(), &pb.PlaceOrderRequest{
+				UserId: "cart-key-1", AccountId: account, UserCurrency: "USD",
+				Address: defaultAddress(), Email: "user@example.com", CreditCard: defaultCard(),
+			})
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if c := m.orders.creates[0]; c.GetUserId() != "" || c.GetSessionId() != "cart-key-1" {
+				t.Errorf("CreateOrder user_id/session_id = %q/%q", c.GetUserId(), c.GetSessionId())
+			}
+		})
+	}
+}
+
+func TestOrders_AccountID_LimitAcceptedAndTooLongRejectedBeforeAnything(t *testing.T) {
+	m := ordersMocks()
+	svc, cleanup := startMockServers(t, m)
+	defer cleanup()
+	req := func(account string) *pb.PlaceOrderRequest {
+		return &pb.PlaceOrderRequest{UserId: "cart-key-1", AccountId: account, UserCurrency: "USD",
+			Address: defaultAddress(), Email: "user@example.com", CreditCard: defaultCard()}
+	}
+
+	_, err := svc.PlaceOrder(context.Background(), req(strings.Repeat("a", 129)))
+	assertStatus(t, err, codes.InvalidArgument, "account_id")
+	assertEvents(t, m) // no cart read, no order, no charge
+	if m.payment.charges() != 0 || m.cart.emptyCalls != 0 {
+		t.Error("something ran before the validation")
+	}
+
+	if _, err := svc.PlaceOrder(context.Background(), req(strings.Repeat("a", 128))); err != nil {
+		t.Errorf("128 characters: %v", err)
+	}
+}
+
+// Without order storage account_id is accepted and has no effect (still validated).
+func TestOrders_Disabled_AccountIDIgnored(t *testing.T) {
+	m := defaultMocks()
+	svc, cleanup := startMockServers(t, m)
+	defer cleanup()
+	_, err := svc.PlaceOrder(context.Background(), &pb.PlaceOrderRequest{
+		UserId: "cart-key-1", AccountId: "acc-1", UserCurrency: "USD",
+		Address: defaultAddress(), CreditCard: defaultCard(),
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }
 

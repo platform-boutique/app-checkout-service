@@ -39,6 +39,7 @@ const (
 	maxEmailLen     = 254
 	minEmailLen     = 3
 	maxSessionIDLen = 128
+	maxAccountIDLen = 128 // CreateOrder.user_id
 	maxStreetLen    = 200
 	maxCityLen      = 100
 	maxStateLen     = 100
@@ -199,6 +200,7 @@ func buildCreateOrder(orderID string, req *pb.PlaceOrderRequest, prep orderPrep,
 	return &orderspb.CreateOrderRequest{
 		OrderId:   orderID,
 		SessionId: req.GetUserId(),
+		UserId:    strings.TrimSpace(req.GetAccountId()),
 		Email:     strings.TrimSpace(req.GetEmail()),
 		ShippingAddress: &orderspb.Address{
 			StreetAddress: a.GetStreetAddress(),

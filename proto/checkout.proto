@@ -179,6 +179,11 @@ message PlaceOrderRequest {
   Address address = 3;
   string email = 5;
   CreditCardInfo credit_card = 6;
+  // Optional account (user) id of a signed-in buyer, max 128 characters. When set, checkout
+  // passes it as CreateOrder.user_id to order-service so the order belongs to the account from
+  // the start. user_id (the cart key) is unchanged and still used as CreateOrder.session_id.
+  // Empty = anonymous order, exactly as before.
+  string account_id = 7;
 }
 
 message PlaceOrderResponse {

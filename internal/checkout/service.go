@@ -345,6 +345,8 @@ func validateRequest(req *pb.PlaceOrderRequest) error {
 		return status.Error(codes.InvalidArgument, "order: shipping address is required")
 	case req.GetCreditCard() == nil:
 		return status.Error(codes.InvalidArgument, "order: credit card is required")
+	case runeLen(req.GetAccountId()) > maxAccountIDLen:
+		return status.Errorf(codes.InvalidArgument, "order: account_id must be at most %d characters", maxAccountIDLen)
 	}
 	return nil
 }

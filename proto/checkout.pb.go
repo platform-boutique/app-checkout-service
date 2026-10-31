@@ -1294,12 +1294,17 @@ func (x *SendOrderConfirmationRequest) GetOrder() *OrderResult {
 }
 
 type PlaceOrderRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	UserId        string                 `protobuf:"bytes,1,opt,name=user_id,json=userId,proto3" json:"user_id,omitempty"`
-	UserCurrency  string                 `protobuf:"bytes,2,opt,name=user_currency,json=userCurrency,proto3" json:"user_currency,omitempty"`
-	Address       *Address               `protobuf:"bytes,3,opt,name=address,proto3" json:"address,omitempty"`
-	Email         string                 `protobuf:"bytes,5,opt,name=email,proto3" json:"email,omitempty"`
-	CreditCard    *CreditCardInfo        `protobuf:"bytes,6,opt,name=credit_card,json=creditCard,proto3" json:"credit_card,omitempty"`
+	state        protoimpl.MessageState `protogen:"open.v1"`
+	UserId       string                 `protobuf:"bytes,1,opt,name=user_id,json=userId,proto3" json:"user_id,omitempty"`
+	UserCurrency string                 `protobuf:"bytes,2,opt,name=user_currency,json=userCurrency,proto3" json:"user_currency,omitempty"`
+	Address      *Address               `protobuf:"bytes,3,opt,name=address,proto3" json:"address,omitempty"`
+	Email        string                 `protobuf:"bytes,5,opt,name=email,proto3" json:"email,omitempty"`
+	CreditCard   *CreditCardInfo        `protobuf:"bytes,6,opt,name=credit_card,json=creditCard,proto3" json:"credit_card,omitempty"`
+	// Optional account (user) id of a signed-in buyer, max 128 characters. When set, checkout
+	// passes it as CreateOrder.user_id to order-service so the order belongs to the account from
+	// the start. user_id (the cart key) is unchanged and still used as CreateOrder.session_id.
+	// Empty = anonymous order, exactly as before.
+	AccountId     string `protobuf:"bytes,7,opt,name=account_id,json=accountId,proto3" json:"account_id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1367,6 +1372,13 @@ func (x *PlaceOrderRequest) GetCreditCard() *CreditCardInfo {
 		return x.CreditCard
 	}
 	return nil
+}
+
+func (x *PlaceOrderRequest) GetAccountId() string {
+	if x != nil {
+		return x.AccountId
+	}
+	return ""
 }
 
 type PlaceOrderResponse struct {
@@ -1497,14 +1509,16 @@ const file_proto_checkout_proto_rawDesc = "" +
 	"\x05items\x18\x05 \x03(\v2\x16.hipstershop.OrderItemR\x05items\"d\n" +
 	"\x1cSendOrderConfirmationRequest\x12\x14\n" +
 	"\x05email\x18\x01 \x01(\tR\x05email\x12.\n" +
-	"\x05order\x18\x02 \x01(\v2\x18.hipstershop.OrderResultR\x05order\"\xd5\x01\n" +
+	"\x05order\x18\x02 \x01(\v2\x18.hipstershop.OrderResultR\x05order\"\xf4\x01\n" +
 	"\x11PlaceOrderRequest\x12\x17\n" +
 	"\auser_id\x18\x01 \x01(\tR\x06userId\x12#\n" +
 	"\ruser_currency\x18\x02 \x01(\tR\fuserCurrency\x12.\n" +
 	"\aaddress\x18\x03 \x01(\v2\x14.hipstershop.AddressR\aaddress\x12\x14\n" +
 	"\x05email\x18\x05 \x01(\tR\x05email\x12<\n" +
 	"\vcredit_card\x18\x06 \x01(\v2\x1b.hipstershop.CreditCardInfoR\n" +
-	"creditCard\"D\n" +
+	"creditCard\x12\x1d\n" +
+	"\n" +
+	"account_id\x18\a \x01(\tR\taccountId\"D\n" +
 	"\x12PlaceOrderResponse\x12.\n" +
 	"\x05order\x18\x01 \x01(\v2\x18.hipstershop.OrderResultR\x05order2\xca\x01\n" +
 	"\vCartService\x12<\n" +

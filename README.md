@@ -24,11 +24,11 @@ Package `hipstershop`, service `CheckoutService` ([`proto/checkout.proto`](proto
 
 | Method | Request | Response |
 |---|---|---|
-| `PlaceOrder` | `PlaceOrderRequest{ user_id, user_currency, Address address, email, CreditCardInfo credit_card }` | `PlaceOrderResponse{ OrderResult order }` (`order_id`, `shipping_tracking_id`, `shipping_cost`, `shipping_address`, `items[]`) |
+| `PlaceOrder` | `PlaceOrderRequest{ user_id, user_currency, Address address, email, CreditCardInfo credit_card, account_id }` | `PlaceOrderResponse{ OrderResult order }` (`order_id`, `shipping_tracking_id`, `shipping_cost`, `shipping_address`, `items[]`) |
 
 ### What `PlaceOrder` does (in order)
 
-1. Reject requests without `user_id`, `user_currency`, address or credit card (`INVALID_ARGUMENT`), before any downstream call.
+1. Reject requests without `user_id`, `user_currency`, address or credit card, or with an `account_id` over 128 characters (`INVALID_ARGUMENT`), before any downstream call.
 2. Generate the order UUID (random v4). It is the `order_id` of the `OrderResult`.
 3. `cart-service.GetCart(user_id)`; an empty cart is `FAILED_PRECONDITION`.
 4. For every cart line, **in parallel**: `product-catalog-service.GetProduct` then `currency-service.Convert` (USD → `user_currency`).
@@ -228,10 +228,11 @@ Optional, switched on by `ORDER_SERVICE_ADDR` (for example `order-service:8085`)
 
 Details:
 
-- `CreateOrder` carries `session_id` = the request `user_id`, the email, the address field for field, one item per cart line with `product_id`, `name`, `picture` and the unit price in the **user's currency** (the converted price), `shipping_cost` and `total`. The total is the amount that is charged: the same `money` package arithmetic (integer units and nanos, no floats) over the same numbers, so it equals `sum(quantity x unit_price) + shipping_cost` exactly, in one currency. `CreateOrder` has a 5 s timeout and runs on the request context.
+- `CreateOrder` carries `session_id` = the request `user_id` (the cart key) and `user_id` = the request `account_id` (empty for an anonymous order), the email, the address field for field, one item per cart line with `product_id`, `name`, `picture` and the unit price in the **user's currency** (the converted price), `shipping_cost` and `total`. The total is the amount that is charged: the same `money` package arithmetic (integer units and nanos, no floats) over the same numbers, so it equals `sum(quantity x unit_price) + shipping_cost` exactly, in one currency. `CreateOrder` has a 5 s timeout and runs on the request context.
 - `FailOrder` and `ConfirmOrder` run on a context detached from the caller (10 s timeout), so a caller that gave up does not leave an order `PENDING` after money moved. The `FailOrder` reason is the message of the status returned to the caller (it can contain the last four card digits that payment-service puts in its decline message, never the card number or CVV).
 - A `ConfirmOrder` failure is not retried and not turned into an error: the money is taken and the parcel is ordered, so the customer gets the success.
 - Limits checked up front (they are order-service's): email 3-254 characters and a plain address; `user_id` at most 128; street 1-200, city 1-100, state at most 100, country 1-100, zip not negative; 1-100 cart lines, quantity 1-1000. A product name over 200 characters is cut, a picture over 500 characters is left out of the snapshot.
+- `account_id` (field 7, optional, max 128 characters) is the id of a signed-in buyer (user-service). It is trimmed and passed as `CreateOrder.user_id` so the order belongs to the account from the start; empty means an anonymous order exactly as before. `user_id` keeps its meaning (cart key: the cart is read and emptied under it, and it is the order's `session_id`). Checkout does not verify the account id (it trusts its caller, the frontend, like it trusts `user_id`) and with `ORDER_SERVICE_ADDR` unset the field is validated but has no effect. Orders placed anonymously are handed to an account later by order-service's `ClaimOrders`, which the frontend calls after login (checkout does not need that RPC, so its copy of `orders.proto` is unchanged).
 - `PlaceOrder` is still not idempotent: each call creates a new order id.
 
 The user's cart must already contain items (add some via `cart-service`), otherwise the order has zero lines and a total of 0.
