@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"net/http/pprof"
 	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
 	"checkout-service/internal/checkout"
@@ -140,6 +142,31 @@ func run(port string) error {
 		log.Info("stock reservation disabled: INVENTORY_SERVICE_ADDR is not set, no stock is reserved")
 	}
 
+	// The orders.placed event is optional: without KAFKA_BROKERS checkout behaves as
+	// before (no event, direct email-service call). With it the event is published
+	// after Ship and Commit, best effort, and checkout no longer calls email-service.
+	// franz-go connects lazily: a broker that is down at startup does not stop checkout.
+	if brokers := checkout.ParseBrokers(os.Getenv("KAFKA_BROKERS")); len(brokers) > 0 {
+		pub, err := checkout.NewKafkaPublisher(brokers)
+		if err != nil {
+			return fmt.Errorf("kafka producer: %w", err)
+		}
+		svc.Events = pub
+		defer func() {
+			// After the gRPC server has drained (see below): flush what is still buffered.
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if err := pub.Close(ctx); err != nil {
+				log.Warnf("kafka producer flush on shutdown: %v", err)
+			} else {
+				log.Info("kafka producer flushed and closed")
+			}
+		}()
+		log.Infof("order events enabled (topic %s, brokers %s)", checkout.OrdersPlacedTopic, os.Getenv("KAFKA_BROKERS"))
+	} else {
+		log.Info("order events disabled: KAFKA_BROKERS is not set, no event is published and email-service is called directly")
+	}
+
 	pb.RegisterCheckoutServiceServer(srv, svc)
 
 	healthSrv := health.NewServer()
@@ -175,6 +202,22 @@ func run(port string) error {
 		log.Infof("metrics endpoint on :%s", metricsPort)
 		if err := metricsSrv.ListenAndServe(); err != nil {
 			log.Warnf("metrics server error: %v", err)
+		}
+	}()
+
+	// SIGTERM/SIGINT: let in-flight PlaceOrder calls finish (bounded), then return so
+	// that the deferred producer flush runs. Serve returns nil after a (graceful) stop.
+	sigCtx, stopSignals := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
+	defer stopSignals()
+	go func() {
+		<-sigCtx.Done()
+		log.Info("shutdown signal received, draining")
+		stopped := make(chan struct{})
+		go func() { srv.GracefulStop(); close(stopped) }()
+		select {
+		case <-stopped:
+		case <-time.After(15 * time.Second):
+			srv.Stop()
 		}
 	}()
 

@@ -41,6 +41,11 @@ type Service struct {
 	// behaves as before; when set, a reservation is mandatory (see inventory.go).
 	InventoryConn *grpc.ClientConn
 
+	// Events publishes the orders.placed event. nil (KAFKA_BROKERS unset) means no
+	// event and PlaceOrder behaves as before, including the direct email-service
+	// call; when set, checkout does not call email-service any more (see events.go).
+	Events EventPublisher
+
 	inflight inflight // order ids with an idempotency key being processed by this process
 }
 
@@ -156,6 +161,11 @@ func (s *Service) PlaceOrder(ctx context.Context, req *pb.PlaceOrderRequest) (*p
 	// Charged and shipped: the stock is sold. A failure is only logged.
 	s.commitStock(ctx, orderID)
 
+	// Charged, shipped and committed: tell the world (orders.placed). Best effort,
+	// bounded by publishTimeout, never fails the order. Before our own ConfirmOrder
+	// so that the order-service consumer and this call can race harmlessly (both idempotent).
+	s.publishOrderPlaced(ctx, orderID, req, prep, total, shippingTrackingID, txID)
+
 	// Charged and shipped: the order is PLACED (3 attempts). A failure here is only
 	// logged (the customer must not see an error for a purchase that went through).
 	s.confirmOrder(ctx, orderID, shippingTrackingID, txID)
@@ -170,10 +180,13 @@ func (s *Service) PlaceOrder(ctx context.Context, req *pb.PlaceOrderRequest) (*p
 		Items:              prep.orderItems,
 	}
 
-	if err := s.sendOrderConfirmation(ctx, req.Email, orderResult); err != nil {
-		log.Warnf("failed to send order confirmation to %q: %+v", req.Email, err)
-	} else {
-		log.Infof("order confirmation email sent to %q", req.Email)
+	// With Kafka on the email consumer sends the confirmation from the event.
+	if s.Events == nil {
+		if err := s.sendOrderConfirmation(ctx, req.Email, orderResult); err != nil {
+			log.Warnf("failed to send order confirmation to %q: %+v", req.Email, err)
+		} else {
+			log.Infof("order confirmation email sent to %q", req.Email)
+		}
 	}
 
 	return &pb.PlaceOrderResponse{Order: orderResult}, nil
