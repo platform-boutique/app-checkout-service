@@ -39,6 +39,9 @@ func NewKafkaPublisher(brokers []string) (*KafkaPublisher, error) {
 		kgo.RecordDeliveryTimeout(publishTimeout),
 		kgo.ProduceRequestTimeout(publishTimeout),
 		kgo.ProducerLinger(0),
+		// The events are a few hundred bytes of JSON: compression gains nothing, and consumers in other languages (email-service uses
+		// the pure-Python kafka-python, which has no codec libraries) cannot read compressed batches (UnsupportedCodecError).
+		kgo.ProducerBatchCompression(kgo.NoCompression()),
 		// The topic is auto-created on first use (compose: KAFKA_NUM_PARTITIONS=3).
 		kgo.AllowAutoTopicCreation(),
 	)
