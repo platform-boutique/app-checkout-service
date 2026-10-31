@@ -184,6 +184,11 @@ message PlaceOrderRequest {
   // the start. user_id (the cart key) is unchanged and still used as CreateOrder.session_id.
   // Empty = anonymous order, exactly as before.
   string account_id = 7;
+  // Optional idempotency key, 0-64 characters of [A-Za-z0-9._-] (INVALID_ARGUMENT otherwise). With
+  // order storage (ORDER_SERVICE_ADDR) the order id becomes UUIDv5(account_id or user_id + NUL + key), so
+  // repeating the call with the same key never charges, reserves or ships twice: a PLACED order is returned
+  // as stored, a PENDING one answers ABORTED, a FAILED one FAILED_PRECONDITION. Empty = random order id as before.
+  string idempotency_key = 8;
 }
 
 message PlaceOrderResponse {

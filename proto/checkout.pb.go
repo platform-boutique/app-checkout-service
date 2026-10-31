@@ -1304,9 +1304,14 @@ type PlaceOrderRequest struct {
 	// passes it as CreateOrder.user_id to order-service so the order belongs to the account from
 	// the start. user_id (the cart key) is unchanged and still used as CreateOrder.session_id.
 	// Empty = anonymous order, exactly as before.
-	AccountId     string `protobuf:"bytes,7,opt,name=account_id,json=accountId,proto3" json:"account_id,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	AccountId string `protobuf:"bytes,7,opt,name=account_id,json=accountId,proto3" json:"account_id,omitempty"`
+	// Optional idempotency key, 0-64 characters of [A-Za-z0-9._-] (INVALID_ARGUMENT otherwise). With
+	// order storage (ORDER_SERVICE_ADDR) the order id becomes UUIDv5(account_id or user_id + NUL + key), so
+	// repeating the call with the same key never charges, reserves or ships twice: a PLACED order is returned
+	// as stored, a PENDING one answers ABORTED, a FAILED one FAILED_PRECONDITION. Empty = random order id as before.
+	IdempotencyKey string `protobuf:"bytes,8,opt,name=idempotency_key,json=idempotencyKey,proto3" json:"idempotency_key,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
 }
 
 func (x *PlaceOrderRequest) Reset() {
@@ -1377,6 +1382,13 @@ func (x *PlaceOrderRequest) GetCreditCard() *CreditCardInfo {
 func (x *PlaceOrderRequest) GetAccountId() string {
 	if x != nil {
 		return x.AccountId
+	}
+	return ""
+}
+
+func (x *PlaceOrderRequest) GetIdempotencyKey() string {
+	if x != nil {
+		return x.IdempotencyKey
 	}
 	return ""
 }
@@ -1509,7 +1521,7 @@ const file_proto_checkout_proto_rawDesc = "" +
 	"\x05items\x18\x05 \x03(\v2\x16.hipstershop.OrderItemR\x05items\"d\n" +
 	"\x1cSendOrderConfirmationRequest\x12\x14\n" +
 	"\x05email\x18\x01 \x01(\tR\x05email\x12.\n" +
-	"\x05order\x18\x02 \x01(\v2\x18.hipstershop.OrderResultR\x05order\"\xf4\x01\n" +
+	"\x05order\x18\x02 \x01(\v2\x18.hipstershop.OrderResultR\x05order\"\x9d\x02\n" +
 	"\x11PlaceOrderRequest\x12\x17\n" +
 	"\auser_id\x18\x01 \x01(\tR\x06userId\x12#\n" +
 	"\ruser_currency\x18\x02 \x01(\tR\fuserCurrency\x12.\n" +
@@ -1518,7 +1530,8 @@ const file_proto_checkout_proto_rawDesc = "" +
 	"\vcredit_card\x18\x06 \x01(\v2\x1b.hipstershop.CreditCardInfoR\n" +
 	"creditCard\x12\x1d\n" +
 	"\n" +
-	"account_id\x18\a \x01(\tR\taccountId\"D\n" +
+	"account_id\x18\a \x01(\tR\taccountId\x12'\n" +
+	"\x0fidempotency_key\x18\b \x01(\tR\x0eidempotencyKey\"D\n" +
 	"\x12PlaceOrderResponse\x12.\n" +
 	"\x05order\x18\x01 \x01(\v2\x18.hipstershop.OrderResultR\x05order2\xca\x01\n" +
 	"\vCartService\x12<\n" +

@@ -1,0 +1,54 @@
+syntax = "proto3";
+
+// Own package (like hipstershop.orders / hipstershop.users): no name clashes with demo.proto.
+package hipstershop.inventory;
+
+// Copied from CONTRACT-inventory.md section 1 (inventory-service/proto/inventory.proto); only go_package differs (own Go package in this repo).
+option go_package = "checkout-service/proto/inventory";
+
+service InventoryService {
+  // GetStock returns the stock of the given products (1-100 ids). Unknown products are simply missing from the answer.
+  rpc GetStock(GetStockRequest) returns (GetStockResponse);
+  // Reserve holds the quantities for an order, ALL OR NOTHING, in one transaction. Idempotent by order_id:
+  // same order_id + same items while RESERVED or COMMITTED -> reserved = true again (nothing changes);
+  // same order_id + different items -> ALREADY_EXISTS; an order_id that was RELEASED -> FAILED_PRECONDITION.
+  // Not enough stock is NOT an error: reserved = false and every short product is listed in shortages (nothing was held).
+  // A product id the service does not know counts as a shortage with available = 0.
+  // INVALID_ARGUMENT: bad order_id, no lines, duplicate product ids, quantity < 1 or > 1000, more than 100 lines.
+  rpc Reserve(ReserveRequest) returns (ReserveResponse);
+  // Commit turns a RESERVED reservation into COMMITTED (the stock stays taken). Idempotent. NOT_FOUND for an unknown order_id,
+  // FAILED_PRECONDITION when it was RELEASED or expired (the hold is gone).
+  rpc Commit(CommitRequest) returns (CommitResponse);
+  // Release gives the held quantities back (RESERVED -> RELEASED). Idempotent; an unknown order_id is OK (the saga calls
+  // Release when it is not sure whether Reserve arrived); FAILED_PRECONDITION for a COMMITTED reservation (sold stock is not returned).
+  rpc Release(ReleaseRequest) returns (ReleaseResponse);
+}
+
+message StockLevel {
+  string product_id = 1;
+  int32 available = 2;   // what can still be reserved right now (total minus held and sold)
+}
+message GetStockRequest  { repeated string product_ids = 1; }
+message GetStockResponse { repeated StockLevel levels = 1; }
+
+message ReserveItem {
+  string product_id = 1;  // 1-128 characters
+  int32 quantity = 2;     // 1-1000
+}
+message ReserveRequest {
+  string order_id = 1;               // 1-64 characters of [A-Za-z0-9._-], starting with a letter or digit (same rule as order-service)
+  repeated ReserveItem items = 2;    // 1-100 lines, product ids unique
+}
+message Shortage {
+  string product_id = 1;
+  int32 requested = 2;
+  int32 available = 3;
+}
+message ReserveResponse {
+  bool reserved = 1;
+  repeated Shortage shortages = 2;   // empty when reserved
+}
+message CommitRequest   { string order_id = 1; }
+message CommitResponse  {}
+message ReleaseRequest  { string order_id = 1; }
+message ReleaseResponse {}
