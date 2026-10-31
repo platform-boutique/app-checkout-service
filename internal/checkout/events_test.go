@@ -91,7 +91,8 @@ func TestEvent_ID_IsUUIDv5OfNamespaceAndOrderID(t *testing.T) {
 	if got := EventID("0d4c1a54-7a52-4a58-9a5e-0e5b5b1f3a11"); got != "f9ebed3d-a36c-57ea-87c0-f0572344656e" {
 		t.Errorf("event id = %s", got)
 	}
-	if EventID("a") == EventID("b") || EventID("a") != EventID("a") {
+	again := EventID("a")
+	if EventID("a") == EventID("b") || EventID("a") != again {
 		t.Error("event id must be a pure function of the order id")
 	}
 	if u, err := uuid.Parse(EventID("x")); err != nil || u.Version() != 5 {

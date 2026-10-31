@@ -19,9 +19,10 @@ Package `hipstershop`, service `CheckoutService` ([`proto/checkout.proto`](https
 9. `payment-service.Charge(total, credit_card)` - failure aborts the order: `Release` the stock, mark the order `FAILED` (nothing is shipped, emptied or mailed).
 10. `shipping-service.ShipOrder`. If it fails, the charge is **compensated** in this order: `payment-service.Refund(transaction_id, total)` is called once (on a context detached from the caller, 10 s timeout), then `Release` of the stock, then `FailOrder`; the shipping error is returned with the note "your payment has been refunded". If the refund itself fails, the original error is kept, the failure is logged at error level with the transaction id, and the message says the refund is pending (with the transaction id as reference).
 11. **Only with inventory:** `inventory-service.Commit(order_id)`, 3 attempts (3 s each, pauses of 1 s then 3 s), on a detached context. If it still fails the order goes on and `STOCK NOT COMMITTED order=<id>` is logged at error level (known gap).
-12. **Only with order storage:** `order-service.ConfirmOrder(order_id, tracking_id, transaction_id)`; the order becomes `PLACED`. 3 attempts (3 s each, pauses of 0.5 s then 2 s) on a detached context; a final answer (`FAILED_PRECONDITION`, `NOT_FOUND`, `INVALID_ARGUMENT`) is not retried. If every attempt fails the order goes on, `ORDER NOT CONFIRMED order=<id>` is logged at error level and the order stays `PENDING` (known gap).
-13. `cart-service.EmptyCart` - error ignored.
-14. `email-service.SendOrderConfirmation` - error logged, **never fails the order**.
+12. **Only if `KAFKA_BROKERS` is set:** publish the `orders.placed` event (key = order id, `acks=all`, idempotent producer, 5 s bound, see [Order events](#order-events-kafka)). It runs after Ship and Commit and before `ConfirmOrder`. A failure or timeout is logged (`EVENT NOT PUBLISHED order=<id>`, error level) and **never fails or delays the order** beyond the bound (known gap: no outbox).
+13. **Only with order storage:** `order-service.ConfirmOrder(order_id, tracking_id, transaction_id)`; the order becomes `PLACED`. 3 attempts (3 s each, pauses of 0.5 s then 2 s) on a detached context; a final answer (`FAILED_PRECONDITION`, `NOT_FOUND`, `INVALID_ARGUMENT`) is not retried. If every attempt fails the order goes on, `ORDER NOT CONFIRMED order=<id>` is logged at error level and the order stays `PENDING` (known gap).
+14. `cart-service.EmptyCart` - error ignored.
+15. `email-service.SendOrderConfirmation` - error logged, **never fails the order**. **Skipped when `KAFKA_BROKERS` is set**: the email consumer sends the confirmation from the event.
 
 Everything that can fail without side effects (steps 1-6) runs before the card is charged. Release, Refund and FailOrder are best effort: their own failure is logged and never replaces the error `PlaceOrder` returns.
 
@@ -60,7 +61,7 @@ Optional, switched on by `ORDER_SERVICE_ADDR` (for example `order-service:8085`)
 
 | Situation (with `ORDER_SERVICE_ADDR`) | Calls | `PlaceOrder` result |
 |---|---|---|
-| Everything works | `CreateOrder`, `Charge`, `ShipOrder`, `ConfirmOrder`, empty cart, email | success, `order.order_id` is the order-service id |
+| Everything works | `CreateOrder`, `Charge`, `ShipOrder`, `ConfirmOrder`, empty cart, email (or the event, see Order events) | success, `order.order_id` is the order-service id |
 | Validation / cart / product / price / quote fails | none to order-service | as without order storage |
 | Email, address or cart outside the order-service limits (see below) | none to order-service | `INVALID_ARGUMENT` (`order: ...`) |
 | `CreateOrder` `UNAVAILABLE` / `DEADLINE_EXCEEDED` / `RESOURCE_EXHAUSTED` / `CANCELED` | `CreateOrder` only | `UNAVAILABLE` (`order service is temporarily unavailable, please retry`), nothing charged |
@@ -109,3 +110,38 @@ Optional, switched on by `INVENTORY_SERVICE_ADDR` (for example `inventory-servic
 - The same key arriving twice at once in one checkout process: the second call gets `ABORTED` immediately (in-memory guard), exactly one charge. After the first finished, the same key replays the stored order.
 - A lookup failure (order-service down) is `UNAVAILABLE`: checkout does not guess.
 - An order stuck `PENDING` (a crash, `FailOrder` or `ConfirmOrder` failing) answers `ABORTED` for its key forever; the customer needs a new key and the order needs manual follow-up.
+
+### Order events (Kafka)
+
+Optional, switched on by `KAFKA_BROKERS` (comma separated seed brokers, for example `kafka:9092`). The topic is `orders.placed` (3 partitions, replication 1, auto-created on first use by the broker config of the compose stack). Client: `github.com/twmb/franz-go` (`pkg/kgo`), pure Go.
+
+- **Unset or empty:** no event, Kafka is never contacted, and `PlaceOrder` behaves as before **including the direct `email-service.SendOrderConfirmation` call**.
+- **Set:** after `ShipOrder` and `Commit` succeeded and before checkout's own `ConfirmOrder`, one record is produced: key = the order id, headers `event-type=order.placed`, `content-type=application/json`, `schema-version=1`, `acks=all`, idempotent producer, a 5 s delivery timeout (the whole step is bounded by 5 s, also for a client that hangs). Checkout then **no longer calls email-service**: the email consumer sends the confirmation from the event. Order-service's consumer uses the same event to confirm an order whose `ConfirmOrder` was missed.
+- The producer is created at startup; franz-go connects lazily, so a broker that is down at startup does not stop checkout and produce errors are per call. On SIGTERM/SIGINT the gRPC server drains (at most 15 s), then the producer is flushed (at most 5 s) and closed.
+- A publish failure (broker down, timeout, ...) is logged at error level (`EVENT NOT PUBLISHED order=<id>` with transaction id and tracking id) and never fails the order: the customer is charged and the parcel is ordered. Metrics: `checkout_order_events_total{result="published|failed"}`, `checkout_order_event_publish_seconds`. The payload (email, address) is never logged.
+- Failed orders (declined, out of stock, shipping failed) publish nothing. An idempotent replay of a stored `PLACED` order (same `idempotency_key`) **never republishes**.
+- Delivery is at-least-once; consumers must be idempotent by `event_id` (`UUIDv5(UUIDv5(URL namespace, "everly/orders.placed"), order_id)`, so a republish of the same order would carry the same id) or `order_id`.
+
+Value (JSON, UTF-8, schema version 1; every field is always present, an unknown one is `""` or `0`):
+
+```json
+{
+  "event_id": "f9ebed3d-a36c-57ea-87c0-f0572344656e",
+  "event_type": "order.placed",
+  "schema_version": 1,
+  "occurred_at": "2026-10-31T18:00:00.123Z",
+  "order_id": "0d4c1a54-7a52-4a58-9a5e-0e5b5b1f3a11",
+  "user_id": "account id or empty string",
+  "email": "customer@example.com",
+  "shipping_address": {"street_address": "1 Main St", "city": "Testville", "state": "NY", "country": "US", "zip_code": 10001},
+  "items": [{"product_id": "prod-1", "name": "Test Widget", "quantity": 2, "unit_price": {"currency_code": "USD", "units": 12, "nanos": 990000000}, "picture": "/static/x.jpg"}],
+  "shipping_cost": {"currency_code": "USD", "units": 5, "nanos": 0},
+  "total": {"currency_code": "USD", "units": 30, "nanos": 980000000},
+  "shipping_tracking_id": "TRK-1",
+  "payment_transaction_id": "TX-1"
+}
+```
+
+Money is the same integer units + nanos (in the user's currency) that were charged and stored in order-service. `user_id` is the account id (empty for an anonymous order), **never** the cart/session key; card data and CVV are never in the event.
+
+Known gaps: there is **no outbox**. Publishing is best effort and happens in the request: if the broker is down or slow the event is lost (only the error log remembers it), the order-service consumer does not learn of the order (checkout's own `ConfirmOrder` still runs) and, because checkout no longer calls email-service when Kafka is on, **that customer gets no confirmation email**. Nothing re-publishes later.

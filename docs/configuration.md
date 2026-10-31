@@ -12,6 +12,7 @@
 | `EMAIL_SERVICE_ADDR` | `email-service:8080` | `host:port` of email |
 | `ORDER_SERVICE_ADDR` | unset (orders are not stored) | `host:port` of order-service. Set: the order is stored before the card is charged and `idempotency_key` works (see Order storage) |
 | `INVENTORY_SERVICE_ADDR` | unset (no stock reservation) | `host:port` of inventory-service, e.g. `inventory-service:8087`. Set: stock is reserved before the charge and committed after the shipment, fail closed (see Stock reservation) |
+| `KAFKA_BROKERS` | unset (no event) | Comma separated seed brokers of Kafka, e.g. `kafka:9092`. Set: `orders.placed` is published after Ship and Commit (best effort, 5 s bound) and checkout no longer calls email-service; empty: today's behaviour with the direct email call. The broker may be down at startup (lazy connect). See Order events |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | unset (telemetry off) | OTLP/**gRPC** endpoint for **traces, metrics and logs** (scheme required), e.g. `http://alloy.monitoring.svc.cluster.local:4317`. Legacy fallback: `COLLECTOR_SERVICE_ADDR` (`host:port`). Telemetry is on iff an endpoint is set |
 | `ENABLE_TRACING` | — | Legacy switch: `0` forces all telemetry off even if an endpoint is set (it is no longer needed to turn telemetry on) |
 | `OTEL_METRIC_EXPORT_INTERVAL` | `15000` | Milliseconds between metric pushes (Go also accepts durations such as `15s`) |
