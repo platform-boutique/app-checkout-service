@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	pb "checkout-service/proto"
+	inventorypb "checkout-service/proto/inventory"
 	orderspb "checkout-service/proto/orders"
 
 	"google.golang.org/grpc"
@@ -195,7 +196,8 @@ type mocks struct {
 	shipping       *mockShippingServer
 	payment        *mockPaymentServer
 	email          *mockEmailServer
-	orders         *mockOrderServer // nil: ORDER_SERVICE_ADDR unset
+	orders         *mockOrderServer     // nil: ORDER_SERVICE_ADDR unset
+	inventory      *mockInventoryServer // nil: INVENTORY_SERVICE_ADDR unset
 }
 
 // startMockServers registers all mock gRPC servers on random ports and returns
@@ -234,6 +236,12 @@ func startMockServers(t *testing.T, m *mocks) (*Service, func()) {
 		orderLis, orderSrv = startOne(func(s *grpc.Server) { orderspb.RegisterOrderServiceServer(s, m.orders) })
 	}
 
+	var invSrv *grpc.Server
+	var invLis net.Listener
+	if m.inventory != nil {
+		invLis, invSrv = startOne(func(s *grpc.Server) { inventorypb.RegisterInventoryServiceServer(s, m.inventory) })
+	}
+
 	svc := &Service{
 		CartConn:           dial(cartLis.Addr().String()),
 		ProductCatalogConn: dial(catalogLis.Addr().String()),
@@ -247,7 +255,14 @@ func startMockServers(t *testing.T, m *mocks) (*Service, func()) {
 		svc.OrderConn = dial(orderLis.Addr().String())
 	}
 
+	if m.inventory != nil {
+		svc.InventoryConn = dial(invLis.Addr().String())
+	}
+
 	cleanup := func() {
+		if invSrv != nil {
+			invSrv.Stop()
+		}
 		if orderSrv != nil {
 			orderSrv.Stop()
 		}

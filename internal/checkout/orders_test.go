@@ -51,8 +51,10 @@ type mockOrderServer struct {
 	createErr  error
 	confirmErr error
 	failErr    error
+	getErr     error
 
 	mu       sync.Mutex
+	stored   map[string]*orderspb.Order // what CreateOrder/ConfirmOrder/FailOrder keep, served by GetOrder
 	creates  []*orderspb.CreateOrderRequest
 	confirms []*orderspb.ConfirmOrderRequest
 	fails    []*orderspb.FailOrderRequest
@@ -91,7 +93,52 @@ func (m *mockOrderServer) CreateOrder(_ context.Context, req *orderspb.CreateOrd
 	if nanosOf(req.GetTotal()).Cmp(sum) != 0 || req.GetTotal().GetNanos() < 0 || req.GetTotal().GetNanos() > 999_999_999 {
 		return nil, status.Errorf(codes.InvalidArgument, "total %v does not equal items + shipping (%v nanos)", req.GetTotal(), sum)
 	}
-	return &orderspb.Order{OrderId: req.GetOrderId()}, nil
+	return m.create(req), nil
+}
+
+// create stores the order PENDING, or returns the stored one (CreateOrder is idempotent by order id).
+func (m *mockOrderServer) create(req *orderspb.CreateOrderRequest) *orderspb.Order {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if o, ok := m.stored[req.GetOrderId()]; ok {
+		return o
+	}
+	if m.stored == nil {
+		m.stored = map[string]*orderspb.Order{}
+	}
+	o := &orderspb.Order{
+		OrderId: req.GetOrderId(), SessionId: req.GetSessionId(), UserId: req.GetUserId(), Email: req.GetEmail(),
+		ShippingAddress: req.GetShippingAddress(), Items: req.GetItems(), ShippingCost: req.GetShippingCost(), Total: req.GetTotal(),
+		Status: orderspb.OrderStatus_ORDER_STATUS_PENDING,
+	}
+	m.stored[req.GetOrderId()] = o
+	return o
+}
+
+// settle moves a stored PENDING order to its final state (no-op for unknown ids).
+func (m *mockOrderServer) settle(id string, f func(*orderspb.Order)) *orderspb.Order {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	o, ok := m.stored[id]
+	if !ok {
+		return &orderspb.Order{OrderId: id}
+	}
+	f(o)
+	return o
+}
+
+func (m *mockOrderServer) GetOrder(_ context.Context, req *orderspb.GetOrderRequest) (*orderspb.Order, error) {
+	m.rec.add("GetOrder")
+	if m.getErr != nil {
+		return nil, m.getErr
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	o, ok := m.stored[req.GetOrderId()]
+	if !ok || (req.GetSessionId() != "" && req.GetSessionId() != o.GetSessionId()) || (req.GetUserId() != "" && req.GetUserId() != o.GetUserId()) {
+		return nil, status.Error(codes.NotFound, "order not found")
+	}
+	return o, nil
 }
 
 func (m *mockOrderServer) ConfirmOrder(_ context.Context, req *orderspb.ConfirmOrderRequest) (*orderspb.Order, error) {
@@ -102,7 +149,11 @@ func (m *mockOrderServer) ConfirmOrder(_ context.Context, req *orderspb.ConfirmO
 	if m.confirmErr != nil {
 		return nil, m.confirmErr
 	}
-	return &orderspb.Order{OrderId: req.GetOrderId()}, nil
+	return m.settle(req.GetOrderId(), func(o *orderspb.Order) {
+		o.Status = orderspb.OrderStatus_ORDER_STATUS_PLACED
+		o.ShippingTrackingId = req.GetShippingTrackingId()
+		o.PaymentTransactionId = req.GetPaymentTransactionId()
+	}), nil
 }
 
 func (m *mockOrderServer) FailOrder(_ context.Context, req *orderspb.FailOrderRequest) (*orderspb.Order, error) {
@@ -113,7 +164,10 @@ func (m *mockOrderServer) FailOrder(_ context.Context, req *orderspb.FailOrderRe
 	if m.failErr != nil {
 		return nil, m.failErr
 	}
-	return &orderspb.Order{OrderId: req.GetOrderId()}, nil
+	return m.settle(req.GetOrderId(), func(o *orderspb.Order) {
+		o.Status = orderspb.OrderStatus_ORDER_STATUS_FAILED
+		o.FailureReason = req.GetReason()
+	}), nil
 }
 
 func (m *mockOrderServer) counts() (creates, confirms, fails int) {
