@@ -507,7 +507,8 @@ func TestIdempotency_OrderIDDerivation(t *testing.T) {
 	id := func(user, account, key string) string {
 		return idempotentOrderID(&pb.PlaceOrderRequest{UserId: user, AccountId: account, IdempotencyKey: key})
 	}
-	if id("u1", "", "k") != id("u1", "", "k") {
+	first, again := id("u1", "", "k"), id("u1", "", "k")
+	if first != again {
 		t.Error("not deterministic")
 	}
 	if id("u1", "", "k") == id("u2", "", "k") {
