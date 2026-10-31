@@ -113,6 +113,13 @@ func (s *Service) createOrder(ctx context.Context, orderID string, req *pb.Place
 	case codes.Unavailable, codes.DeadlineExceeded, codes.ResourceExhausted, codes.Canceled:
 		fields.Warnf("[PlaceOrder] CreateOrder failed, nothing was charged: %v", err)
 		return toStatus(newCallError("order", err))
+	case codes.AlreadyExists:
+		if req.GetIdempotencyKey() != "" {
+			// Same key, different content: another replica created the order meanwhile.
+			fields.Warnf("[PlaceOrder] CreateOrder: order exists with different content (same idempotency key), nothing was charged: %v", err)
+			return errAlreadyProcessing()
+		}
+		fallthrough
 	default:
 		fields.Errorf("[PlaceOrder] CreateOrder rejected the order (checkout bug or contract mismatch), nothing was charged: %v", err)
 		return internalErr()

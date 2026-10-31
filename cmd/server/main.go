@@ -127,6 +127,19 @@ func run(port string) error {
 		log.Info("order storage disabled: ORDER_SERVICE_ADDR is not set, orders are not stored")
 	}
 
+	// Stock reservation is optional: without INVENTORY_SERVICE_ADDR checkout behaves as
+	// before (no reserve/commit). With it, a reservation is mandatory (fail closed): if
+	// inventory-service cannot be reached PlaceOrder fails with Unavailable before the
+	// card is charged.
+	if addr := os.Getenv("INVENTORY_SERVICE_ADDR"); addr != "" {
+		if svc.InventoryConn, connErr = dialGRPC(addr); connErr != nil {
+			return fmt.Errorf("connect to inventory-service: %w", connErr)
+		}
+		log.Infof("stock reservation enabled (inventory-service at %s)", addr)
+	} else {
+		log.Info("stock reservation disabled: INVENTORY_SERVICE_ADDR is not set, no stock is reserved")
+	}
+
 	pb.RegisterCheckoutServiceServer(srv, svc)
 
 	healthSrv := health.NewServer()

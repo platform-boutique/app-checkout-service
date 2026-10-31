@@ -9,6 +9,7 @@ import (
 
 	"checkout-service/internal/money"
 	pb "checkout-service/proto"
+	inventorypb "checkout-service/proto/inventory"
 
 	"github.com/google/uuid"
 	"github.com/sirupsen/logrus"
@@ -34,6 +35,13 @@ type Service struct {
 	// means orders are not stored and PlaceOrder behaves as before; when set,
 	// storing the order is mandatory (see orders.go).
 	OrderConn *grpc.ClientConn
+
+	// InventoryConn is the connection to inventory-service. nil
+	// (INVENTORY_SERVICE_ADDR unset) means no stock reservation and PlaceOrder
+	// behaves as before; when set, a reservation is mandatory (see inventory.go).
+	InventoryConn *grpc.ClientConn
+
+	inflight inflight // order ids with an idempotency key being processed by this process
 }
 
 func (s *Service) PlaceOrder(ctx context.Context, req *pb.PlaceOrderRequest) (*pb.PlaceOrderResponse, error) {
@@ -48,12 +56,28 @@ func (s *Service) PlaceOrder(ctx context.Context, req *pb.PlaceOrderRequest) (*p
 		}
 	}
 
-	// A random (v4) UUID: the order id is also what the customer's tracking link uses.
-	orderUUID, err := uuid.NewRandom()
-	if err != nil {
-		return nil, status.Errorf(codes.Internal, "failed to generate order uuid")
+	var orderID string
+	if req.GetIdempotencyKey() != "" && s.ordersEnabled() {
+		// Same key, same owner -> same order id; what the stored order says decides
+		// what happens (see idempotency.go). The guard stops a concurrent twin.
+		orderID = idempotentOrderID(req)
+		release := s.inflight.acquire(orderID)
+		if release == nil {
+			log.WithField("order_id", orderID).Info("[PlaceOrder] the same idempotency key is already being processed")
+			return nil, errAlreadyProcessing()
+		}
+		defer release()
+		if resp, err := s.replayStoredOrder(ctx, orderID, req); resp != nil || err != nil {
+			return resp, err
+		}
+	} else {
+		// A random (v4) UUID: the order id is also what the customer's tracking link uses.
+		orderUUID, err := uuid.NewRandom()
+		if err != nil {
+			return nil, status.Errorf(codes.Internal, "failed to generate order uuid")
+		}
+		orderID = orderUUID.String()
 	}
-	orderID := orderUUID.String()
 
 	// Everything that can fail without side effects (cart, products, prices,
 	// shipping quote) runs before the card is charged.
@@ -81,8 +105,25 @@ func (s *Service) PlaceOrder(ctx context.Context, req *pb.PlaceOrderRequest) (*p
 		if err := checkOrderLimits(prep); err != nil {
 			return nil, err
 		}
+	}
+	var stock []*inventorypb.ReserveItem
+	if s.inventoryEnabled() {
+		stock, err = stockLines(prep.cartItems)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if s.ordersEnabled() {
 		if err := s.createOrder(ctx, orderID, req, prep, total); err != nil {
 			return nil, err
+		}
+	}
+
+	// With inventory the stock is held before the card is charged (fail closed).
+	if s.inventoryEnabled() {
+		if st := s.reserveStock(ctx, orderID, stock, prep); st != nil {
+			s.failOrder(ctx, orderID, st)
+			return nil, st
 		}
 	}
 
@@ -90,6 +131,7 @@ func (s *Service) PlaceOrder(ctx context.Context, req *pb.PlaceOrderRequest) (*p
 	if err != nil {
 		log.Warnf("[PlaceOrder] charge failed: %v", err)
 		st := toStatus(err)
+		s.releaseStock(ctx, orderID)
 		s.failOrder(ctx, orderID, st)
 		return nil, st
 	}
@@ -99,9 +141,13 @@ func (s *Service) PlaceOrder(ctx context.Context, req *pb.PlaceOrderRequest) (*p
 	if err != nil {
 		log.Errorf("[PlaceOrder] shipping failed after the charge (transaction_id: %s): %v", txID, err)
 		st := s.compensate(ctx, orderID, txID, total, toStatus(err))
+		s.releaseStock(ctx, orderID)
 		s.failOrder(ctx, orderID, st)
 		return nil, st
 	}
+
+	// Charged and shipped: the stock is sold. A failure is only logged.
+	s.commitStock(ctx, orderID)
 
 	// Charged and shipped: the order is PLACED. A failure here is only logged
 	// (the customer must not see an error for a purchase that went through).
@@ -347,6 +393,8 @@ func validateRequest(req *pb.PlaceOrderRequest) error {
 		return status.Error(codes.InvalidArgument, "order: credit card is required")
 	case runeLen(req.GetAccountId()) > maxAccountIDLen:
 		return status.Errorf(codes.InvalidArgument, "order: account_id must be at most %d characters", maxAccountIDLen)
+	case !validIdempotencyKey(req.GetIdempotencyKey()):
+		return status.Errorf(codes.InvalidArgument, "order: idempotency_key must be at most %d characters of A-Z a-z 0-9 . _ -", maxIdempotencyKeyLen)
 	}
 	return nil
 }
