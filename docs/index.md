@@ -37,7 +37,7 @@ flowchart LR
 | **Language / runtime** | Go 1.25 (static binary, `CGO_ENABLED=0`) |
 | **Image** | `mladenovskistefan/checkout-service` |
 | **Protocol / port** | gRPC (HTTP/2, plaintext) on `5050` |
-| **Metrics** | Pushed over OTLP/gRPC (Prometheus registry bridged into OpenTelemetry); `/metrics` on `9090` is still served for debugging |
+| **Metrics** | Prometheus `/metrics` on `9090` (scraped by Alloy) and pushed over OTLP/gRPC (registry bridged into OpenTelemetry); `build_info` gauge |
 | **Health** | Standard `grpc.health.v1.Health/Check` on `5050` — static `SERVING`, does **not** reflect downstream health |
 | **State** | None |
 | **Depends on** | `product-catalog-service`, `cart-service`, `currency-service`, `shipping-service`, `payment-service`, `email-service`; optional: `order-service`, `inventory-service`, Kafka (`KAFKA_BROKERS`, produces `orders.placed`) |

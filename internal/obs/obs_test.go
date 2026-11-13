@@ -243,3 +243,53 @@ func TestTelemetryOffStartsNoPipeline(t *testing.T) {
 		x.Shutdown()
 	}
 }
+
+// OTEL_TRACES_SAMPLER / _ARG are read by the SDK (no explicit sampler is set).
+func TestSamplerFromEnvironment(t *testing.T) {
+	addr := blackhole(t)
+	for sampler, wantRecording := range map[string]bool{"always_off": false, "always_on": true} {
+		t.Run(sampler, func(t *testing.T) {
+			t.Setenv("OTEL_TRACES_SAMPLER", sampler)
+			s := LoadSettings("svc", env(map[string]string{"OTEL_EXPORTER_OTLP_ENDPOINT": "http://" + addr}))
+			shutdown, err := startTelemetry(context.Background(), s)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() {
+				ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+				defer cancel()
+				_ = shutdown(ctx)
+			}()
+			_, span := otel.Tracer("t").Start(context.Background(), "x")
+			defer span.End()
+			if span.IsRecording() != wantRecording {
+				t.Fatalf("OTEL_TRACES_SAMPLER=%s: recording=%v", sampler, span.IsRecording())
+			}
+		})
+	}
+}
+
+// An uncaught panic is one JSON error line, then the panic goes on.
+func TestRecoverLogsPanicAsJSON(t *testing.T) {
+	sink := &syncBuf{}
+	reg := newReg()
+	x := Start(context.Background(), Options{Service: "svc", Loggers: []*logrus.Logger{logrus.New()}, Registerer: reg, Gatherer: reg, NoMetricsServer: true, Out: sink})
+	defer x.Shutdown()
+	func() {
+		defer func() {
+			if r := recover(); r != "kaboom" {
+				t.Fatalf("panic not re-raised: %v", r)
+			}
+		}()
+		defer x.Recover()
+		panic("kaboom")
+	}()
+	lines := strings.Split(strings.TrimSpace(sink.String()), "\n")
+	var m map[string]any
+	if err := json.Unmarshal([]byte(lines[len(lines)-1]), &m); err != nil {
+		t.Fatal(err)
+	}
+	if m["message"] != "panic" || m["error"] != "kaboom" || m["severity"] != "error" {
+		t.Fatalf("%v", m)
+	}
+}
