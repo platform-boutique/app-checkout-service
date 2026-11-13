@@ -84,7 +84,11 @@ func Start(ctx context.Context, o Options) *Obs {
 		x.shutdownTimeout = DefaultShutdownTimeout
 	}
 
-	log.WithFields(logrus.Fields{"commit": s.Commit, "environment": s.Environment, "build_time": BuildTime}).Info("starting")
+	starting := logrus.Fields{"commit": s.Commit, "environment": s.Environment}
+	if BuildTime != "" {
+		starting["build_time"] = BuildTime
+	}
+	log.WithFields(starting).Info("starting")
 	if s.LogLevelInvalid != "" {
 		log.Warnf("LOG_LEVEL=%q is not a level (debug, info, warn, error), using info", s.LogLevelInvalid)
 	}
