@@ -192,15 +192,15 @@ func (s *Service) publishOrderPlaced(ctx context.Context, orderID string, req *p
 	eventPublishSeconds.Observe(time.Since(started).Seconds())
 	if err != nil {
 		eventsTotal.WithLabelValues("failed").Inc()
-		log.WithFields(logrus.Fields{
+		log.WithContext(ctx).WithFields(logrus.Fields{
 			"order_id":       orderID,
 			"transaction_id": txID,
 			"tracking_id":    trackingID,
-		}).Errorf("EVENT NOT PUBLISHED order=%s: the order is placed but the %s event was not sent (no outbox, nothing retries it, the email consumer will not send the confirmation): %v", orderID, OrdersPlacedTopic, err)
+		}).WithError(err).Errorf("EVENT NOT PUBLISHED order=%s: the order is placed but the %s event was not sent (no outbox, nothing retries it, the email consumer will not send the confirmation)", orderID, OrdersPlacedTopic)
 		return
 	}
 	eventsTotal.WithLabelValues("published").Inc()
-	log.WithField("order_id", orderID).Infof("%s event published", OrdersPlacedTopic)
+	log.WithContext(ctx).WithField("order_id", orderID).Infof("%s event published", OrdersPlacedTopic)
 }
 
 func (s *Service) publish(ctx context.Context, orderID string, req *pb.PlaceOrderRequest, prep orderPrep, total *pb.Money, trackingID, txID string) error {

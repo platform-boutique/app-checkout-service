@@ -4,23 +4,18 @@ import (
 	"context"
 	"fmt"
 	"net"
-	"net/http"
-	"net/http/pprof"
 	"os"
 	"os/signal"
 	"syscall"
 	"time"
 
 	"checkout-service/internal/checkout"
+	"checkout-service/internal/obs"
 	pb "checkout-service/proto"
 
-	"github.com/grafana/pyroscope-go"
 	grpcprom "github.com/grpc-ecosystem/go-grpc-prometheus"
-	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/sirupsen/logrus"
 	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
-	"go.opentelemetry.io/otel"
-	"go.opentelemetry.io/otel/propagation"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/health"
@@ -28,41 +23,21 @@ import (
 	"google.golang.org/grpc/reflection"
 )
 
-var log *logrus.Logger
+var log = logrus.New()
 
-func init() {
-	log = logrus.New()
-	log.Formatter = &logrus.JSONFormatter{
-		FieldMap: logrus.FieldMap{
-			logrus.FieldKeyTime:  "timestamp",
-			logrus.FieldKeyLevel: "severity",
-			logrus.FieldKeyMsg:   "message",
-		},
-		TimestampFormat: time.RFC3339Nano,
-	}
-	log.Out = os.Stdout
-}
+// drainTimeout is how long in-flight calls (a card charge must finish) get after SIGTERM.
+const drainTimeout = 15 * time.Second
 
 func main() {
-	// --- Telemetry: traces, metrics and logs pushed over OTLP/gRPC (Alloy → Tempo/Mimir/Loki) ---
-	shutdownTelemetry, err := initTelemetry(context.Background(), "checkout-service", log, checkout.Logger())
-	if err != nil {
-		log.Warnf("telemetry disabled, continuing without it: %v", err)
-	} else {
-		log.Info("telemetry enabled (OTLP/gRPC)")
-		defer func() {
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancel()
-			_ = shutdownTelemetry(ctx)
-		}()
-	}
-
-	// --- Profiling ---
-	if os.Getenv("ENABLE_PROFILING") == "1" {
-		initProfiling()
-	} else {
-		log.Info("profiling disabled — set ENABLE_PROFILING=1 to enable")
-	}
+	// Logger, env contract (OTEL_*, PYROSCOPE_ADDR), OTLP pipelines, Pyroscope, build_info and
+	// /metrics on :9090 live in internal/obs. The package logger of internal/checkout is the
+	// second logger: the request path logs through it.
+	o := obs.Start(context.Background(), obs.Options{
+		Service: "checkout-service",
+		Loggers: []*logrus.Logger{log, checkout.Logger()},
+	})
+	defer o.Recover()
+	defer o.Shutdown()
 
 	port := "5050"
 	if p := os.Getenv("PORT"); p != "" {
@@ -71,7 +46,7 @@ func main() {
 
 	log.Infof("starting grpc server on :%s", port)
 	if err := run(port); err != nil {
-		log.Fatalf("server error: %v", err)
+		o.Fatal("server error", err)
 	}
 }
 
@@ -81,17 +56,10 @@ func run(port string) error {
 		return fmt.Errorf("failed to listen on port %s: %w", port, err)
 	}
 
-	otel.SetTextMapPropagator(
-		propagation.NewCompositeTextMapPropagator(
-			propagation.TraceContext{},
-			propagation.Baggage{},
-		),
-	)
-
 	srv := grpc.NewServer(
 		grpc.StatsHandler(otelgrpc.NewServerHandler()),
-		grpc.UnaryInterceptor(grpcprom.UnaryServerInterceptor),
-		grpc.StreamInterceptor(grpcprom.StreamServerInterceptor),
+		grpc.ChainUnaryInterceptor(obs.UnaryServerInterceptor(), grpcprom.UnaryServerInterceptor),
+		grpc.ChainStreamInterceptor(obs.StreamServerInterceptor(), grpcprom.StreamServerInterceptor),
 	)
 
 	// --- Connect to downstream services ---
@@ -154,10 +122,10 @@ func run(port string) error {
 		svc.Events = pub
 		defer func() {
 			// After the gRPC server has drained (see below): flush what is still buffered.
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			ctx, cancel := context.WithTimeout(context.Background(), obs.DefaultShutdownTimeout)
 			defer cancel()
 			if err := pub.Close(ctx); err != nil {
-				log.Warnf("kafka producer flush on shutdown: %v", err)
+				log.WithError(err).Warn("kafka producer flush on shutdown")
 			} else {
 				log.Info("kafka producer flushed and closed")
 			}
@@ -177,34 +145,6 @@ func run(port string) error {
 	grpcprom.Register(srv)
 	grpcprom.EnableHandlingTimeHistogram()
 
-	// --- Metrics HTTP server with explicit timeouts (G114 fix) ---
-	go func() {
-		metricsMux := http.NewServeMux()
-		metricsMux.Handle("/metrics", promhttp.Handler())
-
-		// G108 fix: only register pprof handlers when explicitly enabled,
-		// never on http.DefaultServeMux.
-		if os.Getenv("ENABLE_PROFILING") == "1" {
-			registerPprofHandlers(metricsMux)
-			log.Info("pprof endpoints registered on metrics server")
-		}
-
-		metricsPort := envOrDefault("METRICS_PORT", "9090")
-		metricsSrv := &http.Server{
-			Addr:              ":" + metricsPort,
-			Handler:           metricsMux,
-			ReadHeaderTimeout: 10 * time.Second,
-			ReadTimeout:       30 * time.Second,
-			WriteTimeout:      60 * time.Second,
-			IdleTimeout:       120 * time.Second,
-		}
-
-		log.Infof("metrics endpoint on :%s", metricsPort)
-		if err := metricsSrv.ListenAndServe(); err != nil {
-			log.Warnf("metrics server error: %v", err)
-		}
-	}()
-
 	// SIGTERM/SIGINT: let in-flight PlaceOrder calls finish (bounded), then return so
 	// that the deferred producer flush runs. Serve returns nil after a (graceful) stop.
 	sigCtx, stopSignals := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
@@ -216,7 +156,7 @@ func run(port string) error {
 		go func() { srv.GracefulStop(); close(stopped) }()
 		select {
 		case <-stopped:
-		case <-time.After(15 * time.Second):
+		case <-time.After(drainTimeout):
 			srv.Stop()
 		}
 	}()
@@ -225,21 +165,11 @@ func run(port string) error {
 	return srv.Serve(listener)
 }
 
-// registerPprofHandlers adds pprof handlers to the given mux.
-// Avoids the blank import of net/http/pprof which unconditionally
-// registers handlers on DefaultServeMux (gosec G108).
-func registerPprofHandlers(mux *http.ServeMux) {
-	mux.HandleFunc("/debug/pprof/", pprof.Index)
-	mux.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
-	mux.HandleFunc("/debug/pprof/profile", pprof.Profile)
-	mux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
-	mux.HandleFunc("/debug/pprof/trace", pprof.Trace)
-}
-
 func dialGRPC(addr string) (*grpc.ClientConn, error) {
 	conn, err := grpc.NewClient(addr,
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
 		grpc.WithStatsHandler(otelgrpc.NewClientHandler()),
+		grpc.WithChainUnaryInterceptor(obs.UnaryClientInterceptor()),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("grpc dial %s: %w", addr, err)
@@ -252,29 +182,4 @@ func envOrDefault(key, fallback string) string {
 		return v
 	}
 	return fallback
-}
-
-func initProfiling() {
-	pyroscopeAddr := os.Getenv("PYROSCOPE_ADDR")
-	if pyroscopeAddr == "" {
-		pyroscopeAddr = "http://pyroscope:4040"
-	}
-
-	_, err := pyroscope.Start(pyroscope.Config{
-		ApplicationName: "checkout-service",
-		ServerAddress:   pyroscopeAddr,
-		Logger:          pyroscope.StandardLogger,
-		ProfileTypes: []pyroscope.ProfileType{
-			pyroscope.ProfileCPU,
-			pyroscope.ProfileAllocObjects,
-			pyroscope.ProfileAllocSpace,
-			pyroscope.ProfileInuseObjects,
-			pyroscope.ProfileInuseSpace,
-		},
-	})
-	if err != nil {
-		log.Warnf("pyroscope init failed, continuing without it: %v", err)
-		return
-	}
-	log.Info("profiling enabled → pushing to " + pyroscopeAddr)
 }

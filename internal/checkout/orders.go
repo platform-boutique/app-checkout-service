@@ -117,20 +117,20 @@ func (s *Service) createOrder(ctx context.Context, orderID string, req *pb.Place
 	if err == nil {
 		return o, nil
 	}
-	fields := log.WithField("order_id", orderID)
+	fields := log.WithContext(ctx).WithField("order_id", orderID)
 	switch c := status.Code(err); c {
 	case codes.Unavailable, codes.DeadlineExceeded, codes.ResourceExhausted, codes.Canceled:
-		fields.Warnf("[PlaceOrder] CreateOrder failed, nothing was charged: %v", err)
+		fields.WithError(err).Warn("[PlaceOrder] CreateOrder failed, nothing was charged")
 		return nil, toStatus(newCallError("order", err))
 	case codes.AlreadyExists:
 		if req.GetIdempotencyKey() != "" {
 			// Same key, different content: another replica created the order meanwhile.
-			fields.Warnf("[PlaceOrder] CreateOrder: order exists with different content (same idempotency key), nothing was charged: %v", err)
+			fields.WithError(err).Warn("[PlaceOrder] CreateOrder: order exists with different content (same idempotency key), nothing was charged")
 			return nil, errAlreadyProcessing()
 		}
 		fallthrough
 	default:
-		fields.Errorf("[PlaceOrder] CreateOrder rejected the order (checkout bug or contract mismatch), nothing was charged: %v", err)
+		fields.WithError(err).Error("[PlaceOrder] CreateOrder rejected the order (checkout bug or contract mismatch), nothing was charged")
 		return nil, internalErr()
 	}
 }
@@ -159,7 +159,7 @@ func (s *Service) failOrder(ctx context.Context, orderID string, cause error) {
 		Reason:  failureReason(cause),
 	})
 	if err != nil {
-		log.WithField("order_id", orderID).Errorf("[PlaceOrder] FailOrder failed, the order stays PENDING: %v", err)
+		log.WithContext(ctx).WithField("order_id", orderID).WithError(err).Error("[PlaceOrder] FailOrder failed, the order stays PENDING")
 	}
 }
 
@@ -189,11 +189,11 @@ func (s *Service) confirmOrder(ctx context.Context, orderID, trackingID, txID st
 		return c != codes.FailedPrecondition && c != codes.NotFound && c != codes.InvalidArgument
 	})
 	if err != nil {
-		log.WithFields(logrus.Fields{
+		log.WithContext(ctx).WithFields(logrus.Fields{
 			"order_id":       orderID,
 			"transaction_id": txID,
 			"tracking_id":    trackingID,
-		}).Errorf("ORDER NOT CONFIRMED order=%s: the customer was charged and the parcel is ordered, but ConfirmOrder failed %d times, the order stays PENDING and needs manual follow-up: %v", orderID, confirmAttempts, err)
+		}).WithError(err).Errorf("ORDER NOT CONFIRMED order=%s: the customer was charged and the parcel is ordered, but ConfirmOrder failed %d times, the order stays PENDING and needs manual follow-up", orderID, confirmAttempts)
 	}
 }
 

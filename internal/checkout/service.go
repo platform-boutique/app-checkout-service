@@ -50,7 +50,7 @@ type Service struct {
 }
 
 func (s *Service) PlaceOrder(ctx context.Context, req *pb.PlaceOrderRequest) (*pb.PlaceOrderResponse, error) {
-	log.Infof("[PlaceOrder] user_id=%q user_currency=%q", req.UserId, req.UserCurrency)
+	log.WithContext(ctx).WithFields(logrus.Fields{"user_id": req.UserId, "user_currency": req.UserCurrency}).Info("[PlaceOrder] received")
 
 	if err := validateRequest(req); err != nil {
 		return nil, err
@@ -68,7 +68,7 @@ func (s *Service) PlaceOrder(ctx context.Context, req *pb.PlaceOrderRequest) (*p
 		orderID = idempotentOrderID(req)
 		release := s.inflight.acquire(orderID)
 		if release == nil {
-			log.WithField("order_id", orderID).Info("[PlaceOrder] the same idempotency key is already being processed")
+			log.WithContext(ctx).WithField("order_id", orderID).Info("[PlaceOrder] the same idempotency key is already being processed")
 			return nil, errAlreadyProcessing()
 		}
 		defer release()
@@ -88,7 +88,7 @@ func (s *Service) PlaceOrder(ctx context.Context, req *pb.PlaceOrderRequest) (*p
 	// shipping quote) runs before the card is charged.
 	prep, err := s.prepareOrderItemsAndShippingQuote(ctx, req.UserId, req.UserCurrency, req.Address)
 	if err != nil {
-		log.Warnf("[PlaceOrder] preparing the order failed: %v", err)
+		log.WithContext(ctx).WithError(err).Warn("[PlaceOrder] preparing the order failed")
 		return nil, toStatus(err)
 	}
 
@@ -126,8 +126,8 @@ func (s *Service) PlaceOrder(ctx context.Context, req *pb.PlaceOrderRequest) (*p
 		if req.GetIdempotencyKey() != "" && alreadyExisted(created) {
 			// Another replica (or an earlier attempt) inserted this order between our
 			// GetOrder lookup and CreateOrder: its state decides, we must not proceed.
-			log.WithField("order_id", orderID).Info("[PlaceOrder] CreateOrder says the order already existed, nothing is reserved or charged")
-			return replayFromOrder(orderID, created)
+			log.WithContext(ctx).WithField("order_id", orderID).Info("[PlaceOrder] CreateOrder says the order already existed, nothing is reserved or charged")
+			return replayFromOrder(ctx, orderID, created)
 		}
 	}
 
@@ -141,17 +141,17 @@ func (s *Service) PlaceOrder(ctx context.Context, req *pb.PlaceOrderRequest) (*p
 
 	txID, err := s.chargeCard(ctx, total, req.CreditCard)
 	if err != nil {
-		log.Warnf("[PlaceOrder] charge failed: %v", err)
+		log.WithContext(ctx).WithError(err).Warn("[PlaceOrder] charge failed")
 		st := toStatus(err)
 		s.releaseStock(ctx, orderID)
 		s.failOrder(ctx, orderID, st)
 		return nil, st
 	}
-	log.Infof("payment went through (transaction_id: %s)", txID)
+	log.WithContext(ctx).WithFields(logrus.Fields{"order_id": orderID, "transaction_id": txID}).Info("payment went through")
 
 	shippingTrackingID, err := s.shipOrder(ctx, req.Address, prep.cartItems)
 	if err != nil {
-		log.Errorf("[PlaceOrder] shipping failed after the charge (transaction_id: %s): %v", txID, err)
+		log.WithContext(ctx).WithFields(logrus.Fields{"order_id": orderID, "transaction_id": txID}).WithError(err).Error("[PlaceOrder] shipping failed after the charge")
 		st := s.compensate(ctx, orderID, txID, total, toStatus(err))
 		s.releaseStock(ctx, orderID)
 		s.failOrder(ctx, orderID, st)
@@ -183,9 +183,9 @@ func (s *Service) PlaceOrder(ctx context.Context, req *pb.PlaceOrderRequest) (*p
 	// With Kafka on the email consumer sends the confirmation from the event.
 	if s.Events == nil {
 		if err := s.sendOrderConfirmation(ctx, req.Email, orderResult); err != nil {
-			log.Warnf("failed to send order confirmation to %q: %+v", req.Email, err)
+			log.WithContext(ctx).WithField("order_id", orderID).WithError(err).Warn("failed to send order confirmation")
 		} else {
-			log.Infof("order confirmation email sent to %q", req.Email)
+			log.WithContext(ctx).WithField("order_id", orderID).Info("order confirmation email sent")
 		}
 	}
 
@@ -384,10 +384,10 @@ func (s *Service) refundCharge(ctx context.Context, txID string, amount *pb.Mone
 // at error level with the transaction id for manual follow-up, and the message
 // says the refund is pending. Card data is never logged.
 func (s *Service) compensate(ctx context.Context, orderID, txID string, amount *pb.Money, cause error) error {
-	fields := log.WithFields(logrus.Fields{"transaction_id": txID, "order_id": orderID})
+	fields := log.WithContext(ctx).WithFields(logrus.Fields{"transaction_id": txID, "order_id": orderID})
 	refundID, err := s.refundCharge(ctx, txID, amount)
 	if err != nil {
-		fields.Errorf("REFUND FAILED, the customer is charged and must be refunded manually: %v", err)
+		fields.WithError(err).Error("REFUND FAILED, the customer is charged and must be refunded manually")
 		return withNote(cause, fmt.Sprintf("your payment (reference %s) was charged and the refund is pending", txID))
 	}
 	fields.WithField("refund_id", refundID).Info("charge refunded after a failed order")

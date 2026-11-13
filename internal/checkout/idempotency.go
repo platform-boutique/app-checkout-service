@@ -97,28 +97,28 @@ func (s *Service) replayStoredOrder(ctx context.Context, orderID string, req *pb
 		get.SessionId = req.GetUserId()
 	}
 	o, err := orderspb.NewOrderServiceClient(s.OrderConn).GetOrder(ctx, get)
-	fields := log.WithField("order_id", orderID)
+	fields := log.WithContext(ctx).WithField("order_id", orderID)
 	if err != nil {
 		switch c := status.Code(err); c {
 		case codes.NotFound:
 			return nil, nil
 		case codes.Unavailable, codes.DeadlineExceeded, codes.ResourceExhausted, codes.Canceled:
-			fields.Warnf("[PlaceOrder] GetOrder failed, nothing was charged: %v", err)
+			fields.WithError(err).Warn("[PlaceOrder] GetOrder failed, nothing was charged")
 			return nil, toStatus(newCallError("order", err))
 		default:
-			fields.Errorf("[PlaceOrder] GetOrder was rejected (checkout bug or contract mismatch), nothing was charged: %v", err)
+			fields.WithError(err).Error("[PlaceOrder] GetOrder was rejected (checkout bug or contract mismatch), nothing was charged")
 			return nil, internalErr()
 		}
 	}
-	return replayFromOrder(orderID, o)
+	return replayFromOrder(ctx, orderID, o)
 }
 
 // replayFromOrder decides what a request does when its order already exists, from the
 // stored order: PLACED and later -> (stored result, nil); PENDING -> ABORTED;
 // FAILED -> FAILED_PRECONDITION. It never returns (nil, nil). Used by the GetOrder-first
 // lookup and by the created=false answer of CreateOrder.
-func replayFromOrder(orderID string, o *orderspb.Order) (*pb.PlaceOrderResponse, error) {
-	fields := log.WithField("order_id", orderID)
+func replayFromOrder(ctx context.Context, orderID string, o *orderspb.Order) (*pb.PlaceOrderResponse, error) {
+	fields := log.WithContext(ctx).WithField("order_id", orderID)
 	switch o.GetStatus() {
 	case orderspb.OrderStatus_ORDER_STATUS_PLACED, orderspb.OrderStatus_ORDER_STATUS_PROCESSING,
 		orderspb.OrderStatus_ORDER_STATUS_SHIPPED, orderspb.OrderStatus_ORDER_STATUS_DELIVERED:

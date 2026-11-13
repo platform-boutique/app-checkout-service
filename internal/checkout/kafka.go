@@ -5,7 +5,10 @@ import (
 	"fmt"
 	"strings"
 
+	"checkout-service/internal/obs"
+
 	"github.com/twmb/franz-go/pkg/kgo"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // KafkaPublisher is the franz-go implementation of EventPublisher: acks=all,
@@ -51,14 +54,25 @@ func NewKafkaPublisher(brokers []string) (*KafkaPublisher, error) {
 	return &KafkaPublisher{client: cl}, nil
 }
 
-// Publish sends the record and waits for the acknowledgement of all in-sync replicas.
-func (p *KafkaPublisher) Publish(ctx context.Context, msg Message) error {
+// buildRecord turns the message into a record and starts the PRODUCER span, a child of
+// the PlaceOrder span in ctx; its W3C traceparent/tracestate go into the record headers so
+// order-service and email-service continue the same trace (OBS-61).
+func buildRecord(ctx context.Context, msg Message) (context.Context, *kgo.Record, trace.Span) {
 	headers := make([]kgo.RecordHeader, len(msg.Headers))
 	for i, h := range msg.Headers {
 		headers[i] = kgo.RecordHeader{Key: h.Key, Value: []byte(h.Value)}
 	}
 	rec := &kgo.Record{Key: []byte(msg.Key), Value: msg.Value, Headers: headers}
-	return p.client.ProduceSync(ctx, rec).FirstErr()
+	ctx, span := obs.ProducerSpan(ctx, OrdersPlacedTopic, rec)
+	return ctx, rec, span
+}
+
+// Publish sends the record and waits for the acknowledgement of all in-sync replicas.
+func (p *KafkaPublisher) Publish(ctx context.Context, msg Message) error {
+	ctx, rec, span := buildRecord(ctx, msg)
+	err := p.client.ProduceSync(ctx, rec).FirstErr()
+	obs.EndSpan(span, err)
+	return err
 }
 
 // Close flushes what is still buffered (until ctx is done) and closes the client.

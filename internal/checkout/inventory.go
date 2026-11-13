@@ -9,7 +9,6 @@ import (
 	pb "checkout-service/proto"
 	inventorypb "checkout-service/proto/inventory"
 
-	"github.com/sirupsen/logrus"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
@@ -91,12 +90,12 @@ func (s *Service) reserveStock(ctx context.Context, orderID string, lines []*inv
 	rctx, cancel := context.WithTimeout(ctx, reserveTimeout)
 	defer cancel()
 	resp, err := s.inventory().Reserve(rctx, &inventorypb.ReserveRequest{OrderId: orderID, Items: lines})
-	fields := log.WithField("order_id", orderID)
+	fields := log.WithContext(ctx).WithField("order_id", orderID)
 	if err != nil {
 		if c := status.Code(err); c == codes.Unavailable || c == codes.DeadlineExceeded || c == codes.Canceled || c == codes.ResourceExhausted {
-			fields.Warnf("[PlaceOrder] Reserve failed, nothing was charged: %v", err)
+			fields.WithError(err).Warn("[PlaceOrder] Reserve failed, nothing was charged")
 		} else {
-			fields.Errorf("[PlaceOrder] Reserve was rejected (checkout bug or contract mismatch), nothing was charged: %v", err)
+			fields.WithError(err).Error("[PlaceOrder] Reserve was rejected (checkout bug or contract mismatch), nothing was charged")
 		}
 		s.releaseStock(ctx, orderID)
 		return status.Error(codes.Unavailable, "stock check unavailable, try again")
@@ -171,7 +170,7 @@ func (s *Service) releaseStock(ctx context.Context, orderID string) {
 		return err
 	}, func(err error) bool { return status.Code(err) != codes.FailedPrecondition })
 	if err != nil {
-		log.WithField("order_id", orderID).Errorf("STOCK NOT RELEASED: the reservation stays held until it expires: %v", err)
+		log.WithContext(ctx).WithField("order_id", orderID).WithError(err).Error("STOCK NOT RELEASED: the reservation stays held until it expires")
 	}
 }
 
@@ -191,7 +190,7 @@ func (s *Service) commitStock(ctx context.Context, orderID string) {
 		return err
 	}, func(error) bool { return true })
 	if err != nil {
-		log.WithFields(logrus.Fields{"order_id": orderID}).Errorf("STOCK NOT COMMITTED order=%s: the customer was charged and the parcel is ordered, the reservation expires by its TTL and the stock may be sold again: %v", orderID, err)
+		log.WithContext(ctx).WithField("order_id", orderID).WithError(err).Errorf("STOCK NOT COMMITTED order=%s: the customer was charged and the parcel is ordered, the reservation expires by its TTL and the stock may be sold again", orderID)
 	}
 }
 
