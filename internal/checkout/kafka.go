@@ -58,13 +58,16 @@ func NewKafkaPublisher(brokers []string) (*KafkaPublisher, error) {
 // the PlaceOrder span in ctx; its W3C traceparent/tracestate go into the record headers so
 // order-service and email-service continue the same trace (OBS-61).
 func buildRecord(ctx context.Context, msg Message) (context.Context, *kgo.Record, trace.Span) {
-	headers := make([]kgo.RecordHeader, len(msg.Headers))
+	hs := make([]obs.KafkaHeader, len(msg.Headers))
 	for i, h := range msg.Headers {
-		headers[i] = kgo.RecordHeader{Key: h.Key, Value: []byte(h.Value)}
+		hs[i] = obs.KafkaHeader{Key: h.Key, Value: []byte(h.Value)}
 	}
-	rec := &kgo.Record{Key: []byte(msg.Key), Value: msg.Value, Headers: headers}
-	ctx, span := obs.ProducerSpan(ctx, OrdersPlacedTopic, rec)
-	return ctx, rec, span
+	ctx, span := obs.ProducerSpan(ctx, OrdersPlacedTopic, &hs)
+	headers := make([]kgo.RecordHeader, len(hs))
+	for i, h := range hs {
+		headers[i] = kgo.RecordHeader{Key: h.Key, Value: h.Value}
+	}
+	return ctx, &kgo.Record{Key: []byte(msg.Key), Value: msg.Value, Headers: headers}, span
 }
 
 // Publish sends the record and waits for the acknowledgement of all in-sync replicas.

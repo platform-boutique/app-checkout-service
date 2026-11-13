@@ -4,7 +4,6 @@ import (
 	"context"
 	"testing"
 
-	"github.com/twmb/franz-go/pkg/kgo"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/propagation"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
@@ -36,21 +35,21 @@ func TestKafkaRoundTrip(t *testing.T) {
 	rec := kafkaSetup(t)
 	ctx, root := otel.Tracer("t").Start(context.Background(), "PlaceOrder")
 
-	r := &kgo.Record{Topic: "orders.placed", Key: []byte("o1"), Headers: []kgo.RecordHeader{{Key: "event-type", Value: []byte("order.placed")}}}
-	_, prod := ProducerSpan(ctx, "orders.placed", r)
+	hs := []KafkaHeader{{Key: "event-type", Value: []byte("order.placed")}}
+	_, prod := ProducerSpan(ctx, "orders.placed", &hs)
 
 	var traceparent string
-	for _, h := range r.Headers {
+	for _, h := range hs {
 		if h.Key == "traceparent" {
 			traceparent = string(h.Value)
 		}
 	}
-	if traceparent == "" || len(r.Headers) != 2 {
-		t.Fatalf("headers after inject: %+v", r.Headers)
+	if traceparent == "" || len(hs) != 2 {
+		t.Fatalf("headers after inject: %+v", hs)
 	}
 
 	// The consumer is another process: nothing but the record crosses over.
-	cctx, cons := ConsumerSpan(context.Background(), "order-service", &kgo.Record{Topic: r.Topic, Partition: 2, Offset: 41, Headers: r.Headers})
+	cctx, cons := ConsumerSpan(context.Background(), "order-service", "orders.placed", 2, 41, hs)
 	if !trace.SpanContextFromContext(cctx).IsValid() {
 		t.Fatal("no span in the consumer context")
 	}
@@ -100,10 +99,10 @@ func TestKafkaTracestateSurvives(t *testing.T) {
 	sid, _ := trace.SpanIDFromHex("00f067aa0ba902b7")
 	ts, _ := trace.ParseTraceState("vendor=abc")
 	ctx := trace.ContextWithSpanContext(context.Background(), trace.NewSpanContext(trace.SpanContextConfig{TraceID: tid, SpanID: sid, TraceFlags: trace.FlagsSampled, TraceState: ts}))
-	r := &kgo.Record{Topic: "orders.placed"}
-	_, span := ProducerSpan(ctx, "orders.placed", r)
+	var hs []KafkaHeader
+	_, span := ProducerSpan(ctx, "orders.placed", &hs)
 	span.End()
-	got := RecordCarrier{Rec: r}.Get("tracestate")
+	got := HeaderCarrier{H: &hs}.Get("tracestate")
 	if got != "vendor=abc" {
 		t.Fatalf("tracestate header = %q", got)
 	}
@@ -116,7 +115,7 @@ func TestKafkaConsumerWithoutUsableHeaders(t *testing.T) {
 	outer, outerSpan := otel.Tracer("t").Start(context.Background(), "poll loop")
 	defer outerSpan.End()
 
-	cases := map[string][]kgo.RecordHeader{
+	cases := map[string][]KafkaHeader{
 		"no headers":         nil,
 		"unrelated headers":  {{Key: "event-type", Value: []byte("order.placed")}},
 		"garbage":            {{Key: "traceparent", Value: []byte("not-a-traceparent")}},
@@ -128,7 +127,7 @@ func TestKafkaConsumerWithoutUsableHeaders(t *testing.T) {
 	}
 	for name, hs := range cases {
 		t.Run(name, func(t *testing.T) {
-			cctx, span := ConsumerSpan(outer, "order-service", &kgo.Record{Topic: "orders.placed", Headers: hs})
+			cctx, span := ConsumerSpan(outer, "order-service", "orders.placed", 0, 0, hs)
 			defer EndSpan(span, nil)
 			sc := trace.SpanContextFromContext(cctx)
 			if !sc.IsValid() {
