@@ -89,7 +89,7 @@ func TestGRPCRequestPathLogsCarryTraceIDs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	ctx := WithRequestID(context.Background(), "req-42")
 	if err := conn.Invoke(ctx, "/t.T/Ping", new(emptypb.Empty), new(emptypb.Empty)); err != nil {

@@ -32,7 +32,7 @@ func get(t *testing.T, url string) (int, string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	b, _ := io.ReadAll(resp.Body)
 	return resp.StatusCode, string(b)
 }
@@ -134,7 +134,7 @@ func TestResourceAttributes(t *testing.T) {
 	}
 	got := map[string]string{}
 	for _, kv := range res.Attributes() {
-		got[string(kv.Key)] = kv.Value.Emit()
+		got[string(kv.Key)] = kv.Value.String()
 	}
 	for k, want := range map[string]string{
 		"service.name": "checkout-service", "service.version": "3.1.4", "service.namespace": "everly",
@@ -149,16 +149,16 @@ func TestResourceAttributes(t *testing.T) {
 	t.Setenv("OTEL_RESOURCE_ATTRIBUTES", "")
 	res, _ = Resource(context.Background(), s)
 	for _, kv := range res.Attributes() {
-		if string(kv.Key) == "deployment.environment" && kv.Value.Emit() != "dev" {
-			t.Errorf("deployment.environment=%s", kv.Value.Emit())
+		if string(kv.Key) == "deployment.environment" && kv.Value.String() != "dev" {
+			t.Errorf("deployment.environment=%s", kv.Value.String())
 		}
 	}
 	d, _ := Resource(context.Background(), LoadSettings("x", env(nil)))
 	for _, kv := range d.Attributes() {
-		if string(kv.Key) == "deployment.environment" && kv.Value.Emit() != "local" {
-			t.Errorf("default deployment.environment=%s", kv.Value.Emit())
+		if string(kv.Key) == "deployment.environment" && kv.Value.String() != "local" {
+			t.Errorf("default deployment.environment=%s", kv.Value.String())
 		}
-		if string(kv.Key) == "service.version" && kv.Value.Emit() == "" {
+		if string(kv.Key) == "service.version" && kv.Value.String() == "" {
 			t.Error("empty service.version")
 		}
 	}
@@ -228,14 +228,13 @@ func TestBlackholedCollectorAndPyroscope(t *testing.T) {
 }
 
 func TestTelemetryOffStartsNoPipeline(t *testing.T) {
-	reg := newReg()
 	for name, e := range map[string]map[string]string{
 		"no endpoint":      nil,
 		"malformed":        {"OTEL_EXPORTER_OTLP_ENDPOINT": "alloy:4317"},
 		"sdk disabled":     {"OTEL_EXPORTER_OTLP_ENDPOINT": "http://127.0.0.1:1", "OTEL_SDK_DISABLED": "true"},
 		"profiling no url": {"ENABLE_PROFILING": "1"},
 	} {
-		reg = newReg()
+		reg := newReg()
 		x := Start(context.Background(), Options{Service: "svc", Loggers: []*logrus.Logger{logrus.New()}, Registerer: reg, Gatherer: reg, NoMetricsServer: true, Getenv: env(e)})
 		if x.telemetry != nil || x.profiler != nil {
 			t.Errorf("%s: a pipeline was started", name)
