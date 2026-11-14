@@ -1,17 +1,27 @@
 name: Publish
 
-# A merge to main publishes the image ONCE (ghcr.io staging, Trivy, Docker Hub as sha-<commit>, cosign, SBOM) and opens the
-# pull request in platform-demo-helm that moves `dev` to the new digest. No tags, no rebuilds.
+# A merge to main is ONE pipeline in this run: the image is published ONCE (the image the pull request built is reused when main's
+# tree is the same; Trivy, Docker Hub as sha-<commit>, cosign, SBOM), the pull request in platform-demo-helm moves `dev` to the new
+# digest, then YOU approve stage and prod on this run's page (Review deployments: the environments `stage` and `prod` of this
+# repository, required reviewer = the owner, deployment branch main) and each approval opens the next helm pull request.
+# No tags in this repository, no rebuilds. The `merge` job of ci.yaml starts this workflow by hand-dispatch (a merge made with the
+# workflow token fires no push trigger) and passes `before` = main's commit before the merge, so a documentation-only merge
+# publishes nothing. Started by hand without `before`, it publishes.
+#
+# There is deliberately NO workflow-level `concurrency` here: a run may wait days for a click, and a group on the whole workflow would
+# queue every later merge behind it. The jobs that must not overlap carry their own groups in service-publish.yaml.
 on:
   push:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      before:
+        description: Commit main was at before the change (empty = publish; set = a documentation-only change since then publishes nothing)
+        type: string
+        required: false
+        default: ""
 
 permissions: {}
-
-concurrency:
-  group: publish-${{ github.ref }}
-  cancel-in-progress: false
 
 jobs:
   publish:
@@ -19,9 +29,11 @@ jobs:
       contents: read
       packages: write
       id-token: write # keyless cosign signing
-    uses: platform-boutique/platform-demo-workflows/.github/workflows/service-publish.yaml@b31c1150b50fd66b4b7d4c07bd654d1c40e2585e # v3.2.1
+      actions: read # the approval jobs read who approved the environments stage and prod of this run
+    uses: platform-boutique/platform-demo-workflows/.github/workflows/service-publish.yaml@9e7a60340fa0720de3fdd72147342e9f5abcbbd3 # v3.6.0
     with:
       app: checkout-service
+      before: ${{ inputs.before }}
     secrets:
       DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
       DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}

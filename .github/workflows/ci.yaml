@@ -1,7 +1,8 @@
 name: CI
 
-# Pull-request gate: secret scan, workflow lint and (when code changed) tests, SAST, SCA and an image build + CVE scan, all in
-# parallel; nothing is pushed. The only required status check is `ci / gate`.
+# Pull-request gate: guards (change detection, secrets, workflows) start at t=0; when code changed, lint, build, tests, SCA, SAST
+# and an image build + CVE scan run in parallel with them (the image is pushed as ghcr.io/<repo>:tree-<hash> and reused by Publish
+# after the merge). The only required status check is `ci / gate`; `merge` comes after it and is not part of it.
 on:
   pull_request:
     branches: [main]
@@ -17,11 +18,9 @@ jobs:
   ci:
     permissions:
       contents: read
-      packages: read # reads the registry build cache
-      checks: write # only the dotnet test reporter uses it; the grant is checked for every job, skipped ones too
-    uses: platform-boutique/platform-demo-workflows/.github/workflows/service-ci.yaml@b31c1150b50fd66b4b7d4c07bd654d1c40e2585e # v3.2.1
+      packages: write # the image job pushes ghcr.io/<repo>:tree-<hash> (same-repository runs; a fork's token stays read-only)
+    uses: platform-boutique/platform-demo-workflows/.github/workflows/service-ci-go.yaml@9e7a60340fa0720de3fdd72147342e9f5abcbbd3 # v3.6.0
     with:
-      language: go
       test-packages: ./internal/...
       e2e-packages: ./tests/e2e/...
       smoke-port: "5050"
@@ -32,3 +31,14 @@ jobs:
         SHIPPING_SERVICE_ADDR=localhost:50051
         PAYMENT_SERVICE_ADDR=localhost:50051
         EMAIL_SERVICE_ADDR=localhost:8080
+
+  # The merge button: waits for you to approve the environment `merge` on the run page (Review deployments), then squash-merges the
+  # tested pull request and starts Publish. Not for forks or Dependabot (read-only token): use the normal Merge button there.
+  merge:
+    needs: ci
+    if: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]' }}
+    permissions:
+      contents: write
+      pull-requests: write
+      actions: write # starts Publish
+    uses: platform-boutique/platform-demo-workflows/.github/workflows/service-merge.yaml@9e7a60340fa0720de3fdd72147342e9f5abcbbd3 # v3.6.0
