@@ -26,9 +26,14 @@ type mockCartServer struct {
 	getErr     error
 	emptyErr   error
 	emptyCalls int
+	hang       bool // GetCart blocks until the caller's context ends (a backend that never answers)
 }
 
-func (m *mockCartServer) GetCart(_ context.Context, req *pb.GetCartRequest) (*pb.Cart, error) {
+func (m *mockCartServer) GetCart(ctx context.Context, req *pb.GetCartRequest) (*pb.Cart, error) {
+	if m.hang {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
 	if m.getErr != nil {
 		return nil, m.getErr
 	}
@@ -127,6 +132,7 @@ type mockPaymentServer struct {
 	transactionID string
 	rec           *recorder
 	onCharge      func() // optional hook run when a charge arrives (before it answers)
+	hang          bool   // Charge blocks until the caller's context ends (a backend that never answers)
 
 	mu          sync.Mutex
 	chargeCalls int
@@ -156,11 +162,15 @@ func (m *mockPaymentServer) Refund(_ context.Context, req *pb.RefundRequest) (*p
 	return &pb.RefundResponse{RefundId: "REFUND-1"}, nil
 }
 
-func (m *mockPaymentServer) Charge(_ context.Context, _ *pb.ChargeRequest) (*pb.ChargeResponse, error) {
+func (m *mockPaymentServer) Charge(ctx context.Context, _ *pb.ChargeRequest) (*pb.ChargeResponse, error) {
 	m.mu.Lock()
 	m.chargeCalls++
 	m.mu.Unlock()
 	m.rec.add("Charge")
+	if m.hang {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
 	if m.onCharge != nil {
 		m.onCharge()
 	}
@@ -198,6 +208,7 @@ type mocks struct {
 	email          *mockEmailServer
 	orders         *mockOrderServer     // nil: ORDER_SERVICE_ADDR unset
 	inventory      *mockInventoryServer // nil: INVENTORY_SERVICE_ADDR unset
+	calls          *callLog             // optional: records the deadline every server sees
 }
 
 // startMockServers registers all mock gRPC servers on random ports and returns
@@ -218,7 +229,11 @@ func startMockServers(t *testing.T, m *mocks) (*Service, func()) {
 		if err != nil {
 			t.Fatalf("listen: %v", err)
 		}
-		s := grpc.NewServer()
+		var opts []grpc.ServerOption
+		if m.calls != nil {
+			opts = append(opts, grpc.ChainUnaryInterceptor(m.calls.intercept))
+		}
+		s := grpc.NewServer(opts...)
 		register(s)
 		go func() { _ = s.Serve(lis) }()
 		return lis, s

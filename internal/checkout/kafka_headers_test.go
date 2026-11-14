@@ -9,16 +9,18 @@ import (
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	"go.opentelemetry.io/otel/trace"
+	"go.opentelemetry.io/otel/trace/noop"
 )
 
 // OBS-61: the record that goes to the broker carries the W3C trace context of a PRODUCER
 // span that is a child of the PlaceOrder span, and keeps the event headers.
 func TestBuildRecordInjectsTraceContext(t *testing.T) {
 	spans := tracetest.NewSpanRecorder()
-	prevTP, prevProp := otel.GetTracerProvider(), otel.GetTextMapPropagator()
+	prevProp := otel.GetTextMapPropagator()
 	otel.SetTracerProvider(sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(spans)))
 	otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator(propagation.TraceContext{}, propagation.Baggage{}))
-	defer func() { otel.SetTracerProvider(prevTP); otel.SetTextMapPropagator(prevProp) }()
+	// A no-op provider on exit, not the value read before: see recordSpans (saga_trace_test.go).
+	defer func() { otel.SetTracerProvider(noop.NewTracerProvider()); otel.SetTextMapPropagator(prevProp) }()
 
 	ctx, root := otel.Tracer("t").Start(context.Background(), "PlaceOrder")
 	msg := Message{Key: "o1", Value: []byte(`{}`), Headers: []Header{{Key: "event-type", Value: eventType}, {Key: "schema-version", Value: "1"}}}

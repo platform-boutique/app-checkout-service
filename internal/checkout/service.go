@@ -13,6 +13,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/sirupsen/logrus"
+	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -86,7 +87,10 @@ func (s *Service) PlaceOrder(ctx context.Context, req *pb.PlaceOrderRequest) (*p
 
 	// Everything that can fail without side effects (cart, products, prices,
 	// shipping quote) runs before the card is charged.
-	prep, err := s.prepareOrderItemsAndShippingQuote(ctx, req.UserId, req.UserCurrency, req.Address)
+	trace.SpanFromContext(ctx).SetAttributes(attrOrderID.String(orderID), attrCurrency.String(req.UserCurrency))
+	pctx, _, endPrepare := startStep(ctx, "prepare", orderID, false)
+	prep, err := s.prepareOrderItemsAndShippingQuote(pctx, req.UserId, req.UserCurrency, req.Address)
+	endPrepare(err)
 	if err != nil {
 		log.WithContext(ctx).WithError(err).Warn("[PlaceOrder] preparing the order failed")
 		return nil, toStatus(err)
@@ -139,7 +143,9 @@ func (s *Service) PlaceOrder(ctx context.Context, req *pb.PlaceOrderRequest) (*p
 		}
 	}
 
-	txID, err := s.chargeCard(ctx, total, req.CreditCard)
+	cctx, _, endCharge := startStep(ctx, "charge", orderID, false, attrCurrency.String(req.UserCurrency))
+	txID, err := s.chargeCard(cctx, total, req.CreditCard)
+	endCharge(err)
 	if err != nil {
 		log.WithContext(ctx).WithError(err).Warn("[PlaceOrder] charge failed")
 		st := toStatus(err)
@@ -149,7 +155,9 @@ func (s *Service) PlaceOrder(ctx context.Context, req *pb.PlaceOrderRequest) (*p
 	}
 	log.WithContext(ctx).WithFields(logrus.Fields{"order_id": orderID, "transaction_id": txID}).Info("payment went through")
 
-	shippingTrackingID, err := s.shipOrder(ctx, req.Address, prep.cartItems)
+	sctx, _, endShip := startStep(ctx, "ship", orderID, false, attrItems.Int(len(prep.cartItems)))
+	shippingTrackingID, err := s.shipOrder(sctx, req.Address, prep.cartItems)
+	endShip(err)
 	if err != nil {
 		log.WithContext(ctx).WithFields(logrus.Fields{"order_id": orderID, "transaction_id": txID}).WithError(err).Error("[PlaceOrder] shipping failed after the charge")
 		st := s.compensate(ctx, orderID, txID, total, toStatus(err))
@@ -170,7 +178,8 @@ func (s *Service) PlaceOrder(ctx context.Context, req *pb.PlaceOrderRequest) (*p
 	// logged (the customer must not see an error for a purchase that went through).
 	s.confirmOrder(ctx, orderID, shippingTrackingID, txID)
 
-	_ = s.emptyUserCart(ctx, req.UserId)
+	ectx, _, endEmpty := startStep(ctx, "empty_cart", orderID, false)
+	endEmpty(s.emptyUserCart(ectx, req.UserId))
 
 	orderResult := &pb.OrderResult{
 		OrderId:            orderID,
@@ -182,7 +191,10 @@ func (s *Service) PlaceOrder(ctx context.Context, req *pb.PlaceOrderRequest) (*p
 
 	// With Kafka on the email consumer sends the confirmation from the event.
 	if s.Events == nil {
-		if err := s.sendOrderConfirmation(ctx, req.Email, orderResult); err != nil {
+		mctx, _, endMail := startStep(ctx, "send_confirmation", orderID, false)
+		err := s.sendOrderConfirmation(mctx, req.Email, orderResult)
+		endMail(err)
+		if err != nil {
 			log.WithContext(ctx).WithField("order_id", orderID).WithError(err).Warn("failed to send order confirmation")
 		} else {
 			log.WithContext(ctx).WithField("order_id", orderID).Info("order confirmation email sent")
@@ -236,6 +248,8 @@ func (s *Service) prepareOrderItemsAndShippingQuote(ctx context.Context, userID,
 }
 
 func (s *Service) getUserCart(ctx context.Context, userID string) ([]*pb.CartItem, error) {
+	ctx, cancel := withTimeout(ctx, readTimeout)
+	defer cancel()
 	cart, err := pb.NewCartServiceClient(s.CartConn).GetCart(ctx, &pb.GetCartRequest{UserId: userID})
 	if err != nil {
 		return nil, newCallError("cart", fmt.Errorf("failed to get user cart: %w", err))
@@ -244,6 +258,8 @@ func (s *Service) getUserCart(ctx context.Context, userID string) ([]*pb.CartIte
 }
 
 func (s *Service) emptyUserCart(ctx context.Context, userID string) error {
+	ctx, cancel := withTimeout(ctx, readTimeout)
+	defer cancel()
 	_, err := pb.NewCartServiceClient(s.CartConn).EmptyCart(ctx, &pb.EmptyCartRequest{UserId: userID})
 	if err != nil {
 		return fmt.Errorf("failed to empty user cart: %w", err)
@@ -265,7 +281,9 @@ func (s *Service) prepOrderItems(ctx context.Context, items []*pb.CartItem, user
 		wg.Add(1)
 		go func(i int, item *pb.CartItem) {
 			defer wg.Done()
-			p, err := cl.GetProduct(ctx, &pb.GetProductRequest{Id: item.GetProductId()})
+			cctx, cancel := withTimeout(ctx, readTimeout)
+			defer cancel()
+			p, err := cl.GetProduct(cctx, &pb.GetProductRequest{Id: item.GetProductId()})
 			products[i] = productResult{p, newCallError("product", err)}
 		}(i, item)
 	}
@@ -308,6 +326,8 @@ func (s *Service) prepOrderItems(ctx context.Context, items []*pb.CartItem, user
 }
 
 func (s *Service) quoteShipping(ctx context.Context, address *pb.Address, items []*pb.CartItem) (*pb.Money, error) {
+	ctx, cancel := withTimeout(ctx, readTimeout)
+	defer cancel()
 	resp, err := pb.NewShippingServiceClient(s.ShippingConn).GetQuote(ctx, &pb.GetQuoteRequest{
 		Address: address,
 		Items:   items,
@@ -319,6 +339,8 @@ func (s *Service) quoteShipping(ctx context.Context, address *pb.Address, items 
 }
 
 func (s *Service) convertCurrency(ctx context.Context, from *pb.Money, toCurrency string) (*pb.Money, error) {
+	ctx, cancel := withTimeout(ctx, readTimeout)
+	defer cancel()
 	result, err := pb.NewCurrencyServiceClient(s.CurrencyConn).Convert(ctx, &pb.CurrencyConversionRequest{
 		From:   from,
 		ToCode: toCurrency,
@@ -330,6 +352,8 @@ func (s *Service) convertCurrency(ctx context.Context, from *pb.Money, toCurrenc
 }
 
 func (s *Service) chargeCard(ctx context.Context, amount *pb.Money, paymentInfo *pb.CreditCardInfo) (string, error) {
+	ctx, cancel := withTimeout(ctx, chargeTimeout)
+	defer cancel()
 	resp, err := pb.NewPaymentServiceClient(s.PaymentConn).Charge(ctx, &pb.ChargeRequest{
 		Amount:     amount,
 		CreditCard: paymentInfo,
@@ -341,6 +365,8 @@ func (s *Service) chargeCard(ctx context.Context, amount *pb.Money, paymentInfo 
 }
 
 func (s *Service) sendOrderConfirmation(ctx context.Context, email string, order *pb.OrderResult) error {
+	ctx, cancel := withTimeout(ctx, emailTimeout)
+	defer cancel()
 	_, err := pb.NewEmailServiceClient(s.EmailConn).SendOrderConfirmation(ctx, &pb.SendOrderConfirmationRequest{
 		Email: email,
 		Order: order,
@@ -349,6 +375,8 @@ func (s *Service) sendOrderConfirmation(ctx context.Context, email string, order
 }
 
 func (s *Service) shipOrder(ctx context.Context, address *pb.Address, items []*pb.CartItem) (string, error) {
+	ctx, cancel := withTimeout(ctx, shipTimeout)
+	defer cancel()
 	resp, err := pb.NewShippingServiceClient(s.ShippingConn).ShipOrder(ctx, &pb.ShipOrderRequest{
 		Address: address,
 		Items:   items,
@@ -384,8 +412,10 @@ func (s *Service) refundCharge(ctx context.Context, txID string, amount *pb.Mone
 // at error level with the transaction id for manual follow-up, and the message
 // says the refund is pending. Card data is never logged.
 func (s *Service) compensate(ctx context.Context, orderID, txID string, amount *pb.Money, cause error) error {
+	ctx, _, endRefund := startStep(ctx, "refund", orderID, true)
 	fields := log.WithContext(ctx).WithFields(logrus.Fields{"transaction_id": txID, "order_id": orderID})
 	refundID, err := s.refundCharge(ctx, txID, amount)
+	endRefund(err)
 	if err != nil {
 		fields.WithError(err).Error("REFUND FAILED, the customer is charged and must be refunded manually")
 		return withNote(cause, fmt.Sprintf("your payment (reference %s) was charged and the refund is pending", txID))

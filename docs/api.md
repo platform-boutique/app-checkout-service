@@ -100,6 +100,8 @@ Optional, switched on by `INVENTORY_SERVICE_ADDR` (for example `inventory-servic
 
 `Release` (5 s per attempt) and `Commit` (3 s per attempt) run on a context detached from the caller, so a customer who closed the tab while the card was being charged does not leave stock held (or sold but uncommitted). `Reserve` runs on the request context with a 5 s timeout.
 
+**Deadlines.** Every outgoing call has one (CODE-05). Calls on the request context are bounded by `min(caller deadline, bound)`: cart `GetCart`/`EmptyCart`, catalog `GetProduct`, currency `Convert` and shipping `GetQuote` 3 s each, `Charge` 10 s, `ShipOrder` 5 s, e-mail `SendOrderConfirmation` 5 s (only without Kafka), `CreateOrder`/`GetOrder` 5 s, `Reserve` 5 s. Calls on a detached context keep their own bounds (`Refund` 10 s, `FailOrder` 10 s, `Release` 5 s and `Commit` 3 s per attempt, `ConfirmOrder` 3 s per attempt). A `Charge` that hits its bound ends as `UNAVAILABLE` (payment service temporarily unavailable) and the money may have been taken (no transaction id, see Known limitations). Tested: every call of a full order is seen by the callee with a deadline, a hung cart service and a hung payment service fail within the bound. A recovery interceptor turns a handler panic into a generic `INTERNAL` (details only in the log).
+
 ### Idempotency
 
 `PlaceOrderRequest.idempotency_key` (field 8, optional) makes a retried or double-submitted `PlaceOrder` safe. It needs order storage (the stored order is the record of what happened); without `ORDER_SERVICE_ADDR` the key is validated and otherwise ignored (random order id, as before).
