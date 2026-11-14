@@ -1,0 +1,45 @@
+# Built binary
+/checkout-service
+/bin/
+/dist/
+
+# Environment files and key material: never commit secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Go tooling
+*.test
+*.out
+*.prof
+*.pprof
+coverage.html
+coverage.out
+go.work
+go.work.sum
+vendor/
+
+# TechDocs / mkdocs build output and its venv
+/site/
+.venv/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Docker
+.docker/
+
+# Agent / session notes: never committed
+STATUS.md
+NOTES*.md
+PLAN.md
+.claude/

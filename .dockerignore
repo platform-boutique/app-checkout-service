@@ -1,1 +1,27 @@
+# The image build only needs go.mod, go.sum, cmd/, internal/ and proto/.
+.git
+.gitignore
+.dockerignore
+.pre-commit-config.yaml
+.github
+Dockerfile
+README.md
+STATUS.md
+NOTES*.md
+docs
+site
+mkdocs.yml
+catalog-info.yaml
+tests
+**/*_test.go
 vendor/
+*.out
+*.prof
+*.pprof
+.env
+.env.*
+*.pem
+*.key
+.venv
+.idea
+.vscode
