@@ -117,13 +117,13 @@ Multi-stage [`Dockerfile`](Dockerfile):
 
 | Stage | Base | What happens |
 |---|---|---|
-| builder | `golang:1.25-alpine` | `go mod download`, then `CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" ./cmd/server` |
+| builder | `golang:1.25-alpine` | `go mod download`, then `CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -ldflags="-s -w -X …/internal/obs.Version=… -X …/internal/obs.Commit=…" ./cmd/server` (BuildKit sets the target, so the same Dockerfile builds amd64 and arm64) |
 | runtime | `alpine:3.21` | single binary at `/app/checkout-service` |
 
 - **Entrypoint:** `/app/checkout-service`. `GOTRACEBACK=single`.
-- **User: root.** The Dockerfile has no `USER`, and the image runs as UID 0 (verified). It needs no privileges (ports > 1024, no file writes), so set a non-root `runAsUser` in Kubernetes (e.g. `10001`) — no image change required.
-- **Architecture: `amd64` only** — `GOARCH=amd64` is hard-coded. On `arm64` nodes the pod fails with `exec format error`. Remove the flag (or use `buildx` with `TARGETARCH`) for multi-arch.
-- **EXPOSE:** `5050`, `9090`. **No `HEALTHCHECK`.**
+- **User:** numeric `USER 10001:10001` (no `/etc/passwd` entry needed; the process writes nothing to disk, so a read-only root filesystem works). Build args `SERVICE_VERSION` (default `dev`) and `SERVICE_COMMIT` (default `unknown`) set the OCI labels `version`/`revision` (plus `source`, `licenses=Apache-2.0`) and the ENV of the same names.
+- **Architecture:** built for the target platform (`TARGETARCH`); only the amd64 build was run here, arm64 is **not run**.
+- **EXPOSE:** `5050`, `9090`. **`HEALTHCHECK`:** `nc -z localhost ${PORT:-5050}` (TCP connect to the gRPC port; the service has no `healthcheck` subcommand, so this does not check `SERVING`).
 - **Image size:** ~10 MB. Alpine includes a shell, so `kubectl exec` works.
 - `.dockerignore` excludes `vendor/` only; `.git` and `tests/` are sent in the build context.
 
@@ -159,7 +159,7 @@ Startup is near-instant; no `startupProbe` needed.
 ```yaml
 securityContext:
   runAsNonRoot: true
-  runAsUser: 10001        # image runs as root by default; any non-zero UID works
+  runAsUser: 10001        # same as the image USER
   runAsGroup: 10001
   readOnlyRootFilesystem: true     # static Go binary, writes nothing
   allowPrivilegeEscalation: false
@@ -382,5 +382,5 @@ The unit tests (`events_test.go`) use a fake publisher and need nothing.
 - **EVENT NOT PUBLISHED (no outbox):** with `KAFKA_BROKERS` set the `orders.placed` event is published inside the request, best effort, with a 5 s bound. If the broker is down or slow the order still succeeds, `EVENT NOT PUBLISHED order=<id>` is logged at error level and nothing publishes the event later. Consequences: order-service's consumer cannot reconcile that order, and since checkout does not call email-service when Kafka is on, the customer gets **no confirmation email**. A crash between the commit of the stock and the publish loses the event the same way. A timed-out publish may still reach the broker later (at-least-once; consumers are idempotent by `event_id`).
 - The Kafka producer was tested with a fake publisher and against a single throwaway `apache/kafka:4.3.2` node (publish and read back, same key on one partition, broker unreachable); it was **not run** in the compose stack, against a broker that goes away mid-run, with TLS/SASL (the compose broker is plaintext without auth) or with several checkout replicas.
 - Health is static; readiness does not reflect downstream availability.
-- Image is `amd64`-only and runs as root unless the pod overrides it.
+- The `HEALTHCHECK` only proves the port accepts connections, not that the service reports `SERVING`.
 - Retries exist only for `Commit`, `Release` and `ConfirmOrder` (3 attempts each; the Kafka publish is one attempt chain bounded by 5 s); every other call is a single attempt with no timeout beyond the incoming request context (except the ones named in the docs).
