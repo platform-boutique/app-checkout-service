@@ -54,7 +54,7 @@ Errors of the saga and idempotency (own messages, not passed through from a down
 
 ### Order storage
 
-Optional, switched on by `ORDER_SERVICE_ADDR` (for example `order-service:8085`). Contract: `order-service` `proto/orders.proto`, copied to [`proto/orders/orders.proto`](proto/orders/orders.proto) in its own Go package `checkout-service/proto/orders` (only `go_package` differs; `Money`, `Address` and `OrderItem` would clash with `hipstershop` otherwise).
+Optional, switched on by `ORDER_SERVICE_ADDR` (for example `order-service:8085`). Contract: `order-service` `proto/orders.proto`, copied to `proto/orders/orders.proto` in its own Go package `checkout-service/proto/orders` (only `go_package` differs; `Money`, `Address` and `OrderItem` would clash with `hipstershop` otherwise).
 
 - **Unset:** `PlaceOrder` behaves as before, no order is stored, order-service is never contacted (the old stack keeps working). The server logs that order storage is disabled.
 - **Set:** storing the order is mandatory. The connection is lazy, so checkout starts even if order-service is down, but every `PlaceOrder` then fails with `UNAVAILABLE` **before** the card is charged.
@@ -82,7 +82,7 @@ Details:
 
 ### Stock reservation
 
-Optional, switched on by `INVENTORY_SERVICE_ADDR` (for example `inventory-service:8087`). Contract: `inventory-service` `proto/inventory.proto`, copied to [`proto/inventory/inventory.proto`](proto/inventory/inventory.proto) in its own Go package `checkout-service/proto/inventory` (only `go_package` differs).
+Optional, switched on by `INVENTORY_SERVICE_ADDR` (for example `inventory-service:8087`). Contract: `inventory-service` `proto/inventory.proto`, copied to `proto/inventory/inventory.proto` in its own Go package `checkout-service/proto/inventory` (only `go_package` differs).
 
 - **Unset:** no reserve, commit or release, inventory-service is never contacted: today's behaviour. The server logs that stock reservation is disabled.
 - **Set:** a reservation is mandatory (fail closed, never sell without one). The connection is lazy: with inventory-service down every `PlaceOrder` fails with `UNAVAILABLE` before the card is charged. It works with or without `ORDER_SERVICE_ADDR`.

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"checkout-service/internal/checkout"
+	"checkout-service/internal/healthcheck"
 	"checkout-service/internal/obs"
 	pb "checkout-service/proto"
 
@@ -29,6 +30,12 @@ var log = logrus.New()
 const drainTimeout = 15 * time.Second
 
 func main() {
+	// `checkout-service healthcheck` is the container health probe: exit 0 only while the server reports SERVING.
+	// It runs before obs.Start so the probe starts no telemetry and writes no log line.
+	if len(os.Args) > 1 && os.Args[1] == "healthcheck" {
+		os.Exit(healthcheck.Check(listenPort()))
+	}
+
 	// Logger, env contract (OTEL_*, PYROSCOPE_ADDR), OTLP pipelines, Pyroscope, build_info and
 	// /metrics on :9090 live in internal/obs. The package logger of internal/checkout is the
 	// second logger: the request path logs through it.
@@ -39,10 +46,7 @@ func main() {
 	defer o.Recover()
 	defer o.Shutdown()
 
-	port := "5050"
-	if p := os.Getenv("PORT"); p != "" {
-		port = p
-	}
+	port := listenPort()
 
 	log.Infof("starting grpc server on :%s", port)
 	if err := run(port); err != nil {
@@ -182,4 +186,12 @@ func envOrDefault(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+// listenPort is the gRPC port: PORT, default 5050.
+func listenPort() string {
+	if p := os.Getenv("PORT"); p != "" {
+		return p
+	}
+	return "5050"
 }

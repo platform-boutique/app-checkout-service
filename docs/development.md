@@ -59,6 +59,7 @@ The unit tests (`events_test.go`) use a fake publisher and need nothing.
 
 ```
 ├── cmd/server/main.go         # entrypoint: tracing, profiling, gRPC server, downstream dials, metrics server
+├── internal/healthcheck/healthcheck.go  # `healthcheck` subcommand (container HEALTHCHECK): grpc.health.v1 Check on the own port
 ├── internal/checkout/         # PlaceOrder orchestration (service.go)
 ├── internal/money/            # Money arithmetic (Sum, MultiplySlow)
 ├── proto/                     # checkout.proto + generated Go (checkout.pb.go, checkout_grpc.pb.go)
