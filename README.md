@@ -123,7 +123,7 @@ Multi-stage [`Dockerfile`](Dockerfile):
 - **Entrypoint:** `/app/checkout-service`. `GOTRACEBACK=single`.
 - **User:** numeric `USER 10001:10001` (no `/etc/passwd` entry needed; the process writes nothing to disk, so a read-only root filesystem works). Build args `SERVICE_VERSION` (default `dev`) and `SERVICE_COMMIT` (default `unknown`) set the OCI labels `version`/`revision` (plus `source`, `licenses=Apache-2.0`) and the ENV of the same names.
 - **Architecture:** built for the target platform (`TARGETARCH`); only the amd64 build was run here, arm64 is **not run**.
-- **EXPOSE:** `5050`, `9090`. **`HEALTHCHECK`:** `nc -z localhost ${PORT:-5050}` (TCP connect to the gRPC port; the service has no `healthcheck` subcommand, so this does not check `SERVING`).
+- **EXPOSE:** `5050`, `9090`. **`HEALTHCHECK`:** exec form `["/app/checkout-service", "healthcheck"]` (no shell, no `nc`/`wget`): the subcommand calls `grpc.health.v1.Health/Check` on `127.0.0.1:${PORT:-5050}` with a 3 s deadline and exits 0 only for `SERVING`. Run locally: `checkout-service healthcheck` (prints the status, exit code 0 or 1).
 - **Image size:** ~10 MB. Alpine includes a shell, so `kubectl exec` works.
 - `.dockerignore` excludes `vendor/` only; `.git` and `tests/` are sent in the build context.
 
@@ -361,6 +361,7 @@ The unit tests (`events_test.go`) use a fake publisher and need nothing.
 
 ```
 ├── cmd/server/main.go         # entrypoint: tracing, profiling, gRPC server, downstream dials, metrics server
+├── internal/healthcheck/healthcheck.go  # `healthcheck` subcommand (container HEALTHCHECK): grpc.health.v1 Check on the own port
 ├── internal/checkout/         # PlaceOrder orchestration (service.go), order storage (orders.go), stock saga (inventory.go), idempotency (idempotency.go), order events (events.go, Kafka producer in kafka.go)
 ├── internal/money/            # Money arithmetic (Sum, MultiplySlow)
 ├── proto/                     # checkout.proto + generated Go; orders/ and inventory/ = vendored contracts of order- and inventory-service
@@ -382,5 +383,5 @@ The unit tests (`events_test.go`) use a fake publisher and need nothing.
 - **EVENT NOT PUBLISHED (no outbox):** with `KAFKA_BROKERS` set the `orders.placed` event is published inside the request, best effort, with a 5 s bound. If the broker is down or slow the order still succeeds, `EVENT NOT PUBLISHED order=<id>` is logged at error level and nothing publishes the event later. Consequences: order-service's consumer cannot reconcile that order, and since checkout does not call email-service when Kafka is on, the customer gets **no confirmation email**. A crash between the commit of the stock and the publish loses the event the same way. A timed-out publish may still reach the broker later (at-least-once; consumers are idempotent by `event_id`).
 - The Kafka producer was tested with a fake publisher and against a single throwaway `apache/kafka:4.3.2` node (publish and read back, same key on one partition, broker unreachable); it was **not run** in the compose stack, against a broker that goes away mid-run, with TLS/SASL (the compose broker is plaintext without auth) or with several checkout replicas.
 - Health is static; readiness does not reflect downstream availability.
-- The `HEALTHCHECK` only proves the port accepts connections, not that the service reports `SERVING`.
+- The `HEALTHCHECK` reports `SERVING` of the gRPC health service, which is static for the service itself (it does not reflect downstream or database health).
 - Retries exist only for `Commit`, `Release` and `ConfirmOrder` (3 attempts each; the Kafka publish is one attempt chain bounded by 5 s); every other call is a single attempt with no timeout beyond the incoming request context (except the ones named in the docs).
