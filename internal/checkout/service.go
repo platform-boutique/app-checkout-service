@@ -3,10 +3,13 @@ package checkout
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
+	"time"
 
 	"checkout-service/internal/money"
 	pb "checkout-service/proto"
+	inventorypb "checkout-service/proto/inventory"
 
 	"github.com/google/uuid"
 	"github.com/sirupsen/logrus"
@@ -27,19 +30,66 @@ type Service struct {
 	ShippingConn       *grpc.ClientConn
 	PaymentConn        *grpc.ClientConn
 	EmailConn          *grpc.ClientConn
+
+	// OrderConn is the connection to order-service. nil (ORDER_SERVICE_ADDR unset)
+	// means orders are not stored and PlaceOrder behaves as before; when set,
+	// storing the order is mandatory (see orders.go).
+	OrderConn *grpc.ClientConn
+
+	// InventoryConn is the connection to inventory-service. nil
+	// (INVENTORY_SERVICE_ADDR unset) means no stock reservation and PlaceOrder
+	// behaves as before; when set, a reservation is mandatory (see inventory.go).
+	InventoryConn *grpc.ClientConn
+
+	// Events publishes the orders.placed event. nil (KAFKA_BROKERS unset) means no
+	// event and PlaceOrder behaves as before, including the direct email-service
+	// call; when set, checkout does not call email-service any more (see events.go).
+	Events EventPublisher
+
+	inflight inflight // order ids with an idempotency key being processed by this process
 }
 
 func (s *Service) PlaceOrder(ctx context.Context, req *pb.PlaceOrderRequest) (*pb.PlaceOrderResponse, error) {
-	log.Infof("[PlaceOrder] user_id=%q user_currency=%q", req.UserId, req.UserCurrency)
+	log.WithContext(ctx).WithFields(logrus.Fields{"user_id": req.UserId, "user_currency": req.UserCurrency}).Info("[PlaceOrder] received")
 
-	orderID, err := uuid.NewUUID()
-	if err != nil {
-		return nil, status.Errorf(codes.Internal, "failed to generate order uuid")
+	if err := validateRequest(req); err != nil {
+		return nil, err
+	}
+	if s.ordersEnabled() {
+		if err := validateForOrders(req); err != nil {
+			return nil, err
+		}
 	}
 
+	var orderID string
+	if req.GetIdempotencyKey() != "" && s.ordersEnabled() {
+		// Same key, same owner -> same order id; what the stored order says decides
+		// what happens (see idempotency.go). The guard stops a concurrent twin.
+		orderID = idempotentOrderID(req)
+		release := s.inflight.acquire(orderID)
+		if release == nil {
+			log.WithContext(ctx).WithField("order_id", orderID).Info("[PlaceOrder] the same idempotency key is already being processed")
+			return nil, errAlreadyProcessing()
+		}
+		defer release()
+		if resp, err := s.replayStoredOrder(ctx, orderID, req); resp != nil || err != nil {
+			return resp, err
+		}
+	} else {
+		// A random (v4) UUID: the order id is also what the customer's tracking link uses.
+		orderUUID, err := uuid.NewRandom()
+		if err != nil {
+			return nil, status.Errorf(codes.Internal, "failed to generate order uuid")
+		}
+		orderID = orderUUID.String()
+	}
+
+	// Everything that can fail without side effects (cart, products, prices,
+	// shipping quote) runs before the card is charged.
 	prep, err := s.prepareOrderItemsAndShippingQuote(ctx, req.UserId, req.UserCurrency, req.Address)
 	if err != nil {
-		return nil, status.Errorf(codes.Internal, "%v", err)
+		log.WithContext(ctx).WithError(err).Warn("[PlaceOrder] preparing the order failed")
+		return nil, toStatus(err)
 	}
 
 	total := &pb.Money{CurrencyCode: req.UserCurrency, Units: 0, Nanos: 0}
@@ -53,31 +103,90 @@ func (s *Service) PlaceOrder(ctx context.Context, req *pb.PlaceOrderRequest) (*p
 		total = money.Must(money.Sum(total, multPrice))
 	}
 
+	// With order storage the order is written (PENDING) before the card is
+	// charged; if that fails nothing has been charged. The total stored is the
+	// very amount that is charged below.
+	if s.ordersEnabled() {
+		if err := checkOrderLimits(prep); err != nil {
+			return nil, err
+		}
+	}
+	var stock []*inventorypb.ReserveItem
+	if s.inventoryEnabled() {
+		stock, err = stockLines(prep.cartItems)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if s.ordersEnabled() {
+		created, err := s.createOrder(ctx, orderID, req, prep, total)
+		if err != nil {
+			return nil, err
+		}
+		if req.GetIdempotencyKey() != "" && alreadyExisted(created) {
+			// Another replica (or an earlier attempt) inserted this order between our
+			// GetOrder lookup and CreateOrder: its state decides, we must not proceed.
+			log.WithContext(ctx).WithField("order_id", orderID).Info("[PlaceOrder] CreateOrder says the order already existed, nothing is reserved or charged")
+			return replayFromOrder(ctx, orderID, created)
+		}
+	}
+
+	// With inventory the stock is held before the card is charged (fail closed).
+	if s.inventoryEnabled() {
+		if st := s.reserveStock(ctx, orderID, stock, prep); st != nil {
+			s.failOrder(ctx, orderID, st)
+			return nil, st
+		}
+	}
+
 	txID, err := s.chargeCard(ctx, total, req.CreditCard)
 	if err != nil {
-		return nil, status.Errorf(codes.Internal, "failed to charge card: %+v", err)
+		log.WithContext(ctx).WithError(err).Warn("[PlaceOrder] charge failed")
+		st := toStatus(err)
+		s.releaseStock(ctx, orderID)
+		s.failOrder(ctx, orderID, st)
+		return nil, st
 	}
-	log.Infof("payment went through (transaction_id: %s)", txID)
+	log.WithContext(ctx).WithFields(logrus.Fields{"order_id": orderID, "transaction_id": txID}).Info("payment went through")
 
 	shippingTrackingID, err := s.shipOrder(ctx, req.Address, prep.cartItems)
 	if err != nil {
-		return nil, status.Errorf(codes.Unavailable, "shipping error: %+v", err)
+		log.WithContext(ctx).WithFields(logrus.Fields{"order_id": orderID, "transaction_id": txID}).WithError(err).Error("[PlaceOrder] shipping failed after the charge")
+		st := s.compensate(ctx, orderID, txID, total, toStatus(err))
+		s.releaseStock(ctx, orderID)
+		s.failOrder(ctx, orderID, st)
+		return nil, st
 	}
+
+	// Charged and shipped: the stock is sold. A failure is only logged.
+	s.commitStock(ctx, orderID)
+
+	// Charged, shipped and committed: tell the world (orders.placed). Best effort,
+	// bounded by publishTimeout, never fails the order. Before our own ConfirmOrder
+	// so that the order-service consumer and this call can race harmlessly (both idempotent).
+	s.publishOrderPlaced(ctx, orderID, req, prep, total, shippingTrackingID, txID)
+
+	// Charged and shipped: the order is PLACED (3 attempts). A failure here is only
+	// logged (the customer must not see an error for a purchase that went through).
+	s.confirmOrder(ctx, orderID, shippingTrackingID, txID)
 
 	_ = s.emptyUserCart(ctx, req.UserId)
 
 	orderResult := &pb.OrderResult{
-		OrderId:            orderID.String(),
+		OrderId:            orderID,
 		ShippingTrackingId: shippingTrackingID,
 		ShippingCost:       prep.shippingCostLocalized,
 		ShippingAddress:    req.Address,
 		Items:              prep.orderItems,
 	}
 
-	if err := s.sendOrderConfirmation(ctx, req.Email, orderResult); err != nil {
-		log.Warnf("failed to send order confirmation to %q: %+v", req.Email, err)
-	} else {
-		log.Infof("order confirmation email sent to %q", req.Email)
+	// With Kafka on the email consumer sends the confirmation from the event.
+	if s.Events == nil {
+		if err := s.sendOrderConfirmation(ctx, req.Email, orderResult); err != nil {
+			log.WithContext(ctx).WithField("order_id", orderID).WithError(err).Warn("failed to send order confirmation")
+		} else {
+			log.WithContext(ctx).WithField("order_id", orderID).Info("order confirmation email sent")
+		}
 	}
 
 	return &pb.PlaceOrderResponse{Order: orderResult}, nil
@@ -87,6 +196,7 @@ func (s *Service) PlaceOrder(ctx context.Context, req *pb.PlaceOrderRequest) (*p
 
 type orderPrep struct {
 	orderItems            []*pb.OrderItem
+	products              []*pb.Product // same order as orderItems; name/picture snapshots for the stored order
 	cartItems             []*pb.CartItem
 	shippingCostLocalized *pb.Money
 }
@@ -99,7 +209,11 @@ func (s *Service) prepareOrderItemsAndShippingQuote(ctx context.Context, userID,
 		return out, fmt.Errorf("cart failure: %w", err)
 	}
 
-	orderItems, err := s.prepOrderItems(ctx, cartItems, userCurrency)
+	if len(cartItems) == 0 {
+		return out, status.Error(codes.FailedPrecondition, "the cart is empty")
+	}
+
+	orderItems, products, err := s.prepOrderItems(ctx, cartItems, userCurrency)
 	if err != nil {
 		return out, fmt.Errorf("failed to prepare order: %w", err)
 	}
@@ -117,13 +231,14 @@ func (s *Service) prepareOrderItemsAndShippingQuote(ctx context.Context, userID,
 	out.shippingCostLocalized = shippingPrice
 	out.cartItems = cartItems
 	out.orderItems = orderItems
+	out.products = products
 	return out, nil
 }
 
 func (s *Service) getUserCart(ctx context.Context, userID string) ([]*pb.CartItem, error) {
 	cart, err := pb.NewCartServiceClient(s.CartConn).GetCart(ctx, &pb.GetCartRequest{UserId: userID})
 	if err != nil {
-		return nil, fmt.Errorf("failed to get user cart: %w", err)
+		return nil, newCallError("cart", fmt.Errorf("failed to get user cart: %w", err))
 	}
 	return cart.GetItems(), nil
 }
@@ -136,7 +251,7 @@ func (s *Service) emptyUserCart(ctx context.Context, userID string) error {
 	return nil
 }
 
-func (s *Service) prepOrderItems(ctx context.Context, items []*pb.CartItem, userCurrency string) ([]*pb.OrderItem, error) {
+func (s *Service) prepOrderItems(ctx context.Context, items []*pb.CartItem, userCurrency string) ([]*pb.OrderItem, []*pb.Product, error) {
 	type productResult struct {
 		product *pb.Product
 		err     error
@@ -151,7 +266,7 @@ func (s *Service) prepOrderItems(ctx context.Context, items []*pb.CartItem, user
 		go func(i int, item *pb.CartItem) {
 			defer wg.Done()
 			p, err := cl.GetProduct(ctx, &pb.GetProductRequest{Id: item.GetProductId()})
-			products[i] = productResult{p, err}
+			products[i] = productResult{p, newCallError("product", err)}
 		}(i, item)
 	}
 	wg.Wait()
@@ -181,13 +296,15 @@ func (s *Service) prepOrderItems(ctx context.Context, items []*pb.CartItem, user
 	wg.Wait()
 
 	result := make([]*pb.OrderItem, len(items))
+	prods := make([]*pb.Product, len(items))
 	for i, r := range out {
 		if r.err != nil {
-			return nil, r.err
+			return nil, nil, r.err
 		}
 		result[i] = r.item
+		prods[i] = products[i].product
 	}
-	return result, nil
+	return result, prods, nil
 }
 
 func (s *Service) quoteShipping(ctx context.Context, address *pb.Address, items []*pb.CartItem) (*pb.Money, error) {
@@ -196,7 +313,7 @@ func (s *Service) quoteShipping(ctx context.Context, address *pb.Address, items 
 		Items:   items,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("failed to get shipping quote: %w", err)
+		return nil, newCallError("shipping", fmt.Errorf("failed to get shipping quote: %w", err))
 	}
 	return resp.GetCostUsd(), nil
 }
@@ -207,7 +324,7 @@ func (s *Service) convertCurrency(ctx context.Context, from *pb.Money, toCurrenc
 		ToCode: toCurrency,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("failed to convert currency: %w", err)
+		return nil, newCallError("currency", fmt.Errorf("failed to convert currency: %w", err))
 	}
 	return result, nil
 }
@@ -218,7 +335,7 @@ func (s *Service) chargeCard(ctx context.Context, amount *pb.Money, paymentInfo 
 		CreditCard: paymentInfo,
 	})
 	if err != nil {
-		return "", fmt.Errorf("could not charge the card: %w", err)
+		return "", newCallError("payment", fmt.Errorf("could not charge the card: %w", err))
 	}
 	return resp.GetTransactionId(), nil
 }
@@ -237,9 +354,69 @@ func (s *Service) shipOrder(ctx context.Context, address *pb.Address, items []*p
 		Items:   items,
 	})
 	if err != nil {
-		return "", fmt.Errorf("shipment failed: %w", err)
+		return "", newCallError("shipping", fmt.Errorf("shipment failed: %w", err))
 	}
 	return resp.GetTrackingId(), nil
+}
+
+// refundTimeout bounds the compensation call. The refund runs on a context
+// detached from the caller's, so a caller that gave up (or whose deadline was
+// used up by the failed shipment) does not leave the customer charged.
+const refundTimeout = 10 * time.Second
+
+// refundCharge asks payment-service to refund a charge (idempotent per transaction id).
+func (s *Service) refundCharge(ctx context.Context, txID string, amount *pb.Money) (string, error) {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), refundTimeout)
+	defer cancel()
+	resp, err := pb.NewPaymentServiceClient(s.PaymentConn).Refund(ctx, &pb.RefundRequest{
+		TransactionId: txID,
+		Amount:        amount,
+	})
+	if err != nil {
+		return "", newCallError("payment", fmt.Errorf("refund failed: %w", err))
+	}
+	return resp.GetRefundId(), nil
+}
+
+// compensate undoes the charge after a later step failed and returns the error
+// PlaceOrder reports: the original failure (cause), with a note on the refund.
+// If the refund itself fails the original error is kept, the failure is logged
+// at error level with the transaction id for manual follow-up, and the message
+// says the refund is pending. Card data is never logged.
+func (s *Service) compensate(ctx context.Context, orderID, txID string, amount *pb.Money, cause error) error {
+	fields := log.WithContext(ctx).WithFields(logrus.Fields{"transaction_id": txID, "order_id": orderID})
+	refundID, err := s.refundCharge(ctx, txID, amount)
+	if err != nil {
+		fields.WithError(err).Error("REFUND FAILED, the customer is charged and must be refunded manually")
+		return withNote(cause, fmt.Sprintf("your payment (reference %s) was charged and the refund is pending", txID))
+	}
+	fields.WithField("refund_id", refundID).Info("charge refunded after a failed order")
+	return withNote(cause, "your payment has been refunded")
+}
+
+// withNote appends a note to the message of a status error, keeping its code.
+func withNote(err error, note string) error {
+	st, _ := status.FromError(err)
+	return status.Errorf(st.Code(), "%s; %s", st.Message(), note)
+}
+
+// validateRequest rejects requests that cannot succeed before any downstream call.
+func validateRequest(req *pb.PlaceOrderRequest) error {
+	switch {
+	case strings.TrimSpace(req.GetUserId()) == "":
+		return status.Error(codes.InvalidArgument, "order: user_id is required")
+	case strings.TrimSpace(req.GetUserCurrency()) == "":
+		return status.Error(codes.InvalidArgument, "order: user_currency is required")
+	case req.GetAddress() == nil:
+		return status.Error(codes.InvalidArgument, "order: shipping address is required")
+	case req.GetCreditCard() == nil:
+		return status.Error(codes.InvalidArgument, "order: credit card is required")
+	case runeLen(req.GetAccountId()) > maxAccountIDLen:
+		return status.Errorf(codes.InvalidArgument, "order: account_id must be at most %d characters", maxAccountIDLen)
+	case !validIdempotencyKey(req.GetIdempotencyKey()):
+		return status.Errorf(codes.InvalidArgument, "order: idempotency_key must be at most %d characters of A-Z a-z 0-9 . _ -", maxIdempotencyKeyLen)
+	}
+	return nil
 }
 
 // Logger exposes the package logger so the entrypoint can attach telemetry hooks to it.

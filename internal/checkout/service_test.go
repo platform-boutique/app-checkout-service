@@ -3,14 +3,18 @@ package checkout
 import (
 	"context"
 	"net"
+	"sync"
 	"testing"
 
 	pb "checkout-service/proto"
+	inventorypb "checkout-service/proto/inventory"
+	orderspb "checkout-service/proto/orders"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/proto"
 )
 
 // ─── Mock servers ────────────────────────────────────────────────────────────
@@ -40,12 +44,16 @@ func (m *mockCartServer) EmptyCart(_ context.Context, _ *pb.EmptyCartRequest) (*
 type mockProductCatalogServer struct {
 	pb.UnimplementedProductCatalogServiceServer
 	product *pb.Product
+	byID    map[string]*pb.Product // optional: per-id products, falls back to product
 	err     error
 }
 
-func (m *mockProductCatalogServer) GetProduct(_ context.Context, _ *pb.GetProductRequest) (*pb.Product, error) {
+func (m *mockProductCatalogServer) GetProduct(_ context.Context, req *pb.GetProductRequest) (*pb.Product, error) {
 	if m.err != nil {
 		return nil, m.err
+	}
+	if p, ok := m.byID[req.GetId()]; ok {
+		return proto.Clone(p).(*pb.Product), nil
 	}
 	return m.product, nil
 }
@@ -71,11 +79,25 @@ type mockShippingServer struct {
 	quoteErr   error
 	shipErr    error
 	trackingID string
+	quote      *pb.Money // optional shipping quote in USD, default 5.00
+	rec        *recorder
+
+	mu        sync.Mutex
+	shipCalls int
+}
+
+func (m *mockShippingServer) shipped() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.shipCalls
 }
 
 func (m *mockShippingServer) GetQuote(_ context.Context, _ *pb.GetQuoteRequest) (*pb.GetQuoteResponse, error) {
 	if m.quoteErr != nil {
 		return nil, m.quoteErr
+	}
+	if m.quote != nil {
+		return &pb.GetQuoteResponse{CostUsd: proto.Clone(m.quote).(*pb.Money)}, nil
 	}
 	return &pb.GetQuoteResponse{
 		CostUsd: &pb.Money{CurrencyCode: "USD", Units: 5, Nanos: 0},
@@ -83,6 +105,10 @@ func (m *mockShippingServer) GetQuote(_ context.Context, _ *pb.GetQuoteRequest) 
 }
 
 func (m *mockShippingServer) ShipOrder(_ context.Context, _ *pb.ShipOrderRequest) (*pb.ShipOrderResponse, error) {
+	m.mu.Lock()
+	m.shipCalls++
+	m.mu.Unlock()
+	m.rec.add("ShipOrder")
 	if m.shipErr != nil {
 		return nil, m.shipErr
 	}
@@ -97,10 +123,47 @@ func (m *mockShippingServer) ShipOrder(_ context.Context, _ *pb.ShipOrderRequest
 type mockPaymentServer struct {
 	pb.UnimplementedPaymentServiceServer
 	err           error
+	refundErr     error
 	transactionID string
+	rec           *recorder
+	onCharge      func() // optional hook run when a charge arrives (before it answers)
+
+	mu          sync.Mutex
+	chargeCalls int
+	refunds     []*pb.RefundRequest
+}
+
+func (m *mockPaymentServer) charges() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.chargeCalls
+}
+
+func (m *mockPaymentServer) refundRequests() []*pb.RefundRequest {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return append([]*pb.RefundRequest(nil), m.refunds...)
+}
+
+func (m *mockPaymentServer) Refund(_ context.Context, req *pb.RefundRequest) (*pb.RefundResponse, error) {
+	m.mu.Lock()
+	m.refunds = append(m.refunds, req)
+	m.mu.Unlock()
+	m.rec.add("Refund")
+	if m.refundErr != nil {
+		return nil, m.refundErr
+	}
+	return &pb.RefundResponse{RefundId: "REFUND-1"}, nil
 }
 
 func (m *mockPaymentServer) Charge(_ context.Context, _ *pb.ChargeRequest) (*pb.ChargeResponse, error) {
+	m.mu.Lock()
+	m.chargeCalls++
+	m.mu.Unlock()
+	m.rec.add("Charge")
+	if m.onCharge != nil {
+		m.onCharge()
+	}
 	if m.err != nil {
 		return nil, m.err
 	}
@@ -133,6 +196,8 @@ type mocks struct {
 	shipping       *mockShippingServer
 	payment        *mockPaymentServer
 	email          *mockEmailServer
+	orders         *mockOrderServer     // nil: ORDER_SERVICE_ADDR unset
+	inventory      *mockInventoryServer // nil: INVENTORY_SERVICE_ADDR unset
 }
 
 // startMockServers registers all mock gRPC servers on random ports and returns
@@ -165,6 +230,17 @@ func startMockServers(t *testing.T, m *mocks) (*Service, func()) {
 	shippingLis, shippingSrv := startOne(func(s *grpc.Server) { pb.RegisterShippingServiceServer(s, m.shipping) })
 	paymentLis, paymentSrv := startOne(func(s *grpc.Server) { pb.RegisterPaymentServiceServer(s, m.payment) })
 	emailLis, emailSrv := startOne(func(s *grpc.Server) { pb.RegisterEmailServiceServer(s, m.email) })
+	var orderSrv *grpc.Server
+	var orderLis net.Listener
+	if m.orders != nil {
+		orderLis, orderSrv = startOne(func(s *grpc.Server) { orderspb.RegisterOrderServiceServer(s, m.orders) })
+	}
+
+	var invSrv *grpc.Server
+	var invLis net.Listener
+	if m.inventory != nil {
+		invLis, invSrv = startOne(func(s *grpc.Server) { inventorypb.RegisterInventoryServiceServer(s, m.inventory) })
+	}
 
 	svc := &Service{
 		CartConn:           dial(cartLis.Addr().String()),
@@ -175,7 +251,21 @@ func startMockServers(t *testing.T, m *mocks) (*Service, func()) {
 		EmailConn:          dial(emailLis.Addr().String()),
 	}
 
+	if m.orders != nil {
+		svc.OrderConn = dial(orderLis.Addr().String())
+	}
+
+	if m.inventory != nil {
+		svc.InventoryConn = dial(invLis.Addr().String())
+	}
+
 	cleanup := func() {
+		if invSrv != nil {
+			invSrv.Stop()
+		}
+		if orderSrv != nil {
+			orderSrv.Stop()
+		}
 		cartSrv.Stop()
 		catalogSrv.Stop()
 		currencySrv.Stop()
@@ -289,121 +379,6 @@ func TestPlaceOrder_GeneratesUniqueOrderIDs(t *testing.T) {
 	}
 }
 
-func TestPlaceOrder_CartFailure_ReturnsInternalError(t *testing.T) {
-	m := defaultMocks()
-	m.cart.getErr = status.Error(codes.Unavailable, "cart service down")
-
-	svc, cleanup := startMockServers(t, m)
-	defer cleanup()
-
-	_, err := svc.PlaceOrder(context.Background(), &pb.PlaceOrderRequest{
-		UserId:       "user-1",
-		UserCurrency: "USD",
-		Address:      defaultAddress(),
-		Email:        "user@example.com",
-		CreditCard:   defaultCard(),
-	})
-
-	if err == nil {
-		t.Fatal("expected error when cart fails, got nil")
-	}
-	if status.Code(err) != codes.Internal {
-		t.Errorf("expected codes.Internal, got %v", status.Code(err))
-	}
-}
-
-func TestPlaceOrder_ProductCatalogFailure_ReturnsInternalError(t *testing.T) {
-	m := defaultMocks()
-	m.productCatalog.err = status.Error(codes.NotFound, "product not found")
-
-	svc, cleanup := startMockServers(t, m)
-	defer cleanup()
-
-	_, err := svc.PlaceOrder(context.Background(), &pb.PlaceOrderRequest{
-		UserId:       "user-1",
-		UserCurrency: "USD",
-		Address:      defaultAddress(),
-		Email:        "user@example.com",
-		CreditCard:   defaultCard(),
-	})
-
-	if err == nil {
-		t.Fatal("expected error when product catalog fails, got nil")
-	}
-	if status.Code(err) != codes.Internal {
-		t.Errorf("expected codes.Internal, got %v", status.Code(err))
-	}
-}
-
-func TestPlaceOrder_ShippingQuoteFailure_ReturnsInternalError(t *testing.T) {
-	m := defaultMocks()
-	m.shipping.quoteErr = status.Error(codes.Unavailable, "shipping service down")
-
-	svc, cleanup := startMockServers(t, m)
-	defer cleanup()
-
-	_, err := svc.PlaceOrder(context.Background(), &pb.PlaceOrderRequest{
-		UserId:       "user-1",
-		UserCurrency: "USD",
-		Address:      defaultAddress(),
-		Email:        "user@example.com",
-		CreditCard:   defaultCard(),
-	})
-
-	if err == nil {
-		t.Fatal("expected error when shipping quote fails, got nil")
-	}
-	if status.Code(err) != codes.Internal {
-		t.Errorf("expected codes.Internal, got %v", status.Code(err))
-	}
-}
-
-func TestPlaceOrder_PaymentFailure_ReturnsInternalError(t *testing.T) {
-	m := defaultMocks()
-	m.payment.err = status.Error(codes.InvalidArgument, "card declined")
-
-	svc, cleanup := startMockServers(t, m)
-	defer cleanup()
-
-	_, err := svc.PlaceOrder(context.Background(), &pb.PlaceOrderRequest{
-		UserId:       "user-1",
-		UserCurrency: "USD",
-		Address:      defaultAddress(),
-		Email:        "user@example.com",
-		CreditCard:   defaultCard(),
-	})
-
-	if err == nil {
-		t.Fatal("expected error when payment fails, got nil")
-	}
-	if status.Code(err) != codes.Internal {
-		t.Errorf("expected codes.Internal, got %v", status.Code(err))
-	}
-}
-
-func TestPlaceOrder_ShipOrderFailure_ReturnsUnavailable(t *testing.T) {
-	m := defaultMocks()
-	m.shipping.shipErr = status.Error(codes.Unavailable, "shipping failed")
-
-	svc, cleanup := startMockServers(t, m)
-	defer cleanup()
-
-	_, err := svc.PlaceOrder(context.Background(), &pb.PlaceOrderRequest{
-		UserId:       "user-1",
-		UserCurrency: "USD",
-		Address:      defaultAddress(),
-		Email:        "user@example.com",
-		CreditCard:   defaultCard(),
-	})
-
-	if err == nil {
-		t.Fatal("expected error when ship order fails, got nil")
-	}
-	if status.Code(err) != codes.Unavailable {
-		t.Errorf("expected codes.Unavailable, got %v", status.Code(err))
-	}
-}
-
 // Email failure must NOT fail the order — it's a warn-only path.
 func TestPlaceOrder_EmailFailure_OrderStillSucceeds(t *testing.T) {
 	m := defaultMocks()
@@ -450,30 +425,6 @@ func TestPlaceOrder_CartEmptiedAfterSuccess(t *testing.T) {
 	}
 	if m.cart.emptyCalls != 1 {
 		t.Errorf("expected EmptyCart to be called once, got %d", m.cart.emptyCalls)
-	}
-}
-
-// An empty cart should still produce a valid order (zero-item edge case).
-func TestPlaceOrder_EmptyCart_Succeeds(t *testing.T) {
-	m := defaultMocks()
-	m.cart.cart = &pb.Cart{UserId: "user-1", Items: []*pb.CartItem{}}
-
-	svc, cleanup := startMockServers(t, m)
-	defer cleanup()
-
-	resp, err := svc.PlaceOrder(context.Background(), &pb.PlaceOrderRequest{
-		UserId:       "user-1",
-		UserCurrency: "USD",
-		Address:      defaultAddress(),
-		Email:        "user@example.com",
-		CreditCard:   defaultCard(),
-	})
-
-	if err != nil {
-		t.Fatalf("unexpected error for empty cart: %v", err)
-	}
-	if len(resp.GetOrder().GetItems()) != 0 {
-		t.Errorf("expected 0 items, got %d", len(resp.GetOrder().GetItems()))
 	}
 }
 

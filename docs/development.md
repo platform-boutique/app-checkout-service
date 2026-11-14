@@ -36,6 +36,25 @@ curl -s localhost:9090/metrics | grep grpc_server
 
 The user's cart must already contain items (add some via `cart-service`), otherwise the order has zero lines and a total of 0.
 
+### Kafka integration tests
+
+`internal/checkout/kafka_integration_test.go` (build tag `integration`) publishes a real event and reads it back, and checks that `PlaceOrder` still succeeds within the bound with the broker down. It needs a throwaway single-node Kafka reachable at `KAFKA_TEST_BROKERS` (default `127.0.0.1:19094`):
+
+```bash
+docker run -d --rm --name d1-kafka --hostname d1-kafka --memory 768m \
+  -e KAFKA_NODE_ID=1 -e KAFKA_PROCESS_ROLES=broker,controller \
+  -e KAFKA_LISTENERS=PLAINTEXT://:9092,CONTROLLER://:9093 -e KAFKA_ADVERTISED_LISTENERS=PLAINTEXT://127.0.0.1:19094 \
+  -e KAFKA_CONTROLLER_LISTENER_NAMES=CONTROLLER -e KAFKA_LISTENER_SECURITY_PROTOCOL_MAP=CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT \
+  -e KAFKA_CONTROLLER_QUORUM_VOTERS=1@localhost:9093 -e KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR=1 \
+  -e KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR=1 -e KAFKA_TRANSACTION_STATE_LOG_MIN_ISR=1 \
+  -e KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS=0 -e KAFKA_NUM_PARTITIONS=3 -e KAFKA_HEAP_OPTS="-Xms256m -Xmx384m" \
+  -p 127.0.0.1:19094:9092 apache/kafka:4.3.2     # ~40 s to start
+go test -tags integration -race -count=1 ./internal/checkout/ -run TestKafka
+docker rm -f d1-kafka
+```
+
+The unit tests (`events_test.go`) use a fake publisher and need nothing.
+
 ## Project structure
 
 ```

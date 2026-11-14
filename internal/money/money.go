@@ -70,7 +70,9 @@ func Sum(l, r *pb.Money) (*pb.Money, error) {
 	units := l.GetUnits() + r.GetUnits()
 	nanos := l.GetNanos() + r.GetNanos()
 
-	if (units == 0 && nanos == 0) || (units > 0 && nanos >= 0) || (units < 0 && nanos <= 0) {
+	// units == 0 must take the carry branch too: with the old condition 0.1 + 0.2
+	// came out as {units: 1, nanos: -700000000}, which has mismatching signs.
+	if units == 0 || (units > 0 && nanos >= 0) || (units < 0 && nanos <= 0) {
 		units += int64(nanos / nanosMod)
 		nanos = nanos % nanosMod
 	} else {

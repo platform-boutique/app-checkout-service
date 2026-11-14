@@ -131,8 +131,20 @@ message ChargeResponse {
   string transaction_id = 1;
 }
 
+message RefundRequest {
+  string transaction_id = 1;
+  Money amount = 2;
+}
+
+message RefundResponse {
+  string refund_id = 1;
+}
+
 service PaymentService {
   rpc Charge(ChargeRequest) returns (ChargeResponse) {}
+  // Added with the payment decline-and-refund change (additive). Idempotent
+  // per transaction_id. Used to compensate a charge when shipping fails.
+  rpc Refund(RefundRequest) returns (RefundResponse) {}
 }
 
 // --- Email ---
@@ -167,6 +179,16 @@ message PlaceOrderRequest {
   Address address = 3;
   string email = 5;
   CreditCardInfo credit_card = 6;
+  // Optional account (user) id of a signed-in buyer, max 128 characters. When set, checkout
+  // passes it as CreateOrder.user_id to order-service so the order belongs to the account from
+  // the start. user_id (the cart key) is unchanged and still used as CreateOrder.session_id.
+  // Empty = anonymous order, exactly as before.
+  string account_id = 7;
+  // Optional idempotency key, 0-64 characters of [A-Za-z0-9._-] (INVALID_ARGUMENT otherwise). With
+  // order storage (ORDER_SERVICE_ADDR) the order id becomes UUIDv5(account_id or user_id + NUL + key), so
+  // repeating the call with the same key never charges, reserves or ships twice: a PLACED order is returned
+  // as stored, a PENDING one answers ABORTED, a FAILED one FAILED_PRECONDITION. Empty = random order id as before.
+  string idempotency_key = 8;
 }
 
 message PlaceOrderResponse {
