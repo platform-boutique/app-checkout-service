@@ -3,6 +3,8 @@ multi-ecosystem-groups:
   dependencies:
     schedule:
       interval: monthly
+    commit-message:
+      prefix: "chore(deps)"
 updates:
   - package-ecosystem: gomod
     directory: /
@@ -10,8 +12,6 @@ updates:
     patterns: ["*"]
     cooldown:
       default-days: 7 # let a new release settle before it is proposed
-    commit-message:
-      prefix: "chore(deps)"
     ignore:
       - dependency-name: "*"
         update-types:
@@ -22,8 +22,6 @@ updates:
     patterns: ["*"]
     cooldown:
       default-days: 7 # let a new release settle before it is proposed
-    commit-message:
-      prefix: "chore(deps)"
     ignore:
       - dependency-name: "*"
         update-types:
@@ -35,8 +33,6 @@ updates:
     patterns: ["*"]
     cooldown:
       default-days: 7 # let a new release settle before it is proposed
-    commit-message:
-      prefix: "chore(deps)"
     ignore:
       - dependency-name: "*"
         update-types:
