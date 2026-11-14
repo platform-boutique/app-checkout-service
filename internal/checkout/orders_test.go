@@ -463,7 +463,7 @@ func TestOrders_CreateConnectionRefused_Unavailable_NoCharge(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer svc.OrderConn.Close()
+	defer func() { _ = svc.OrderConn.Close() }()
 
 	_, err = placeOrder(t, svc)
 
