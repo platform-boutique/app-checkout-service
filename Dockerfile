@@ -5,6 +5,7 @@ ARG TARGETOS TARGETARCH
 # Build identity, linked into internal/obs (a -X for a symbol the binary does not have is ignored by the linker)
 ARG SERVICE_VERSION=dev
 ARG SERVICE_COMMIT=unknown
+ARG BUILD_TIME=
 
 WORKDIR /app
 # go.mod needs a newer patch release than the golang:1.26-alpine tag ships: let Go fetch the toolchain it asks for
@@ -15,7 +16,7 @@ RUN go mod download
 
 COPY . .
 RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build \
-    -ldflags="-s -w -X checkout-service/internal/obs.Version=${SERVICE_VERSION} -X checkout-service/internal/obs.Commit=${SERVICE_COMMIT}" \
+    -ldflags="-s -w -X checkout-service/internal/obs.Version=${SERVICE_VERSION} -X checkout-service/internal/obs.Commit=${SERVICE_COMMIT} -X checkout-service/internal/obs.BuildTime=${BUILD_TIME}" \
     -o /checkout-service \
     ./cmd/server
 

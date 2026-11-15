@@ -87,9 +87,14 @@ func stockLines(items []*pb.CartItem) ([]*inventorypb.ReserveItem, error) {
 // reservation could not be confirmed (RPC error) it releases best effort first,
 // because the request may have arrived and the answer got lost.
 func (s *Service) reserveStock(ctx context.Context, orderID string, lines []*inventorypb.ReserveItem, prep orderPrep) error {
-	rctx, cancel := context.WithTimeout(ctx, reserveTimeout)
+	sctx, span, endStep := startStep(ctx, "reserve_stock", orderID, false, attrItems.Int(len(lines)))
+	rctx, cancel := context.WithTimeout(sctx, reserveTimeout)
 	defer cancel()
 	resp, err := s.inventory().Reserve(rctx, &inventorypb.ReserveRequest{OrderId: orderID, Items: lines})
+	if err == nil && !resp.GetReserved() {
+		span.SetAttributes(attrOutcome.String("out_of_stock")) // a shortage is a business answer: the span stays OK
+	}
+	endStep(err)
 	fields := log.WithContext(ctx).WithField("order_id", orderID)
 	if err != nil {
 		if c := status.Code(err); c == codes.Unavailable || c == codes.DeadlineExceeded || c == codes.Canceled || c == codes.ResourceExhausted {
@@ -162,13 +167,18 @@ func (s *Service) releaseStock(ctx context.Context, orderID string) {
 	if !s.inventoryEnabled() {
 		return
 	}
+	ctx, span, endStep := startStep(ctx, "release_stock", orderID, true)
 	ctx = context.WithoutCancel(ctx)
+	attempts := 0
 	err := retry(stockAttempts, stockBackoff, func() error {
+		attempts++
 		actx, cancel := context.WithTimeout(ctx, stockTimeout)
 		defer cancel()
 		_, err := s.inventory().Release(actx, &inventorypb.ReleaseRequest{OrderId: orderID})
 		return err
 	}, func(err error) bool { return status.Code(err) != codes.FailedPrecondition })
+	span.SetAttributes(attrAttempts.Int(attempts))
+	endStep(err)
 	if err != nil {
 		log.WithContext(ctx).WithField("order_id", orderID).WithError(err).Error("STOCK NOT RELEASED: the reservation stays held until it expires")
 	}
@@ -182,13 +192,18 @@ func (s *Service) commitStock(ctx context.Context, orderID string) {
 	if !s.inventoryEnabled() {
 		return
 	}
+	ctx, span, endStep := startStep(ctx, "commit_stock", orderID, false)
 	ctx = context.WithoutCancel(ctx)
+	attempts := 0
 	err := retry(stockAttempts, stockBackoff, func() error {
+		attempts++
 		actx, cancel := context.WithTimeout(ctx, commitTimeout)
 		defer cancel()
 		_, err := s.inventory().Commit(actx, &inventorypb.CommitRequest{OrderId: orderID})
 		return err
 	}, func(error) bool { return true })
+	span.SetAttributes(attrAttempts.Int(attempts))
+	endStep(err)
 	if err != nil {
 		log.WithContext(ctx).WithField("order_id", orderID).WithError(err).Errorf("STOCK NOT COMMITTED order=%s: the customer was charged and the parcel is ordered, the reservation expires by its TTL and the stock may be sold again", orderID)
 	}

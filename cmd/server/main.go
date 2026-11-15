@@ -62,7 +62,8 @@ func run(port string) error {
 
 	srv := grpc.NewServer(
 		grpc.StatsHandler(otelgrpc.NewServerHandler()),
-		grpc.ChainUnaryInterceptor(obs.UnaryServerInterceptor(), grpcprom.UnaryServerInterceptor),
+		// Recovery runs innermost so a recovered panic is still counted as INTERNAL.
+		grpc.ChainUnaryInterceptor(obs.UnaryServerInterceptor(), grpcprom.UnaryServerInterceptor, checkout.RecoveryUnaryInterceptor(log)),
 		grpc.ChainStreamInterceptor(obs.StreamServerInterceptor(), grpcprom.StreamServerInterceptor),
 	)
 

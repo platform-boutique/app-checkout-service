@@ -111,9 +111,11 @@ func checkOrderLimits(prep orderPrep) error {
 // Unavailable, everything else (including InvalidArgument, which means checkout
 // built a bad request) is Internal.
 func (s *Service) createOrder(ctx context.Context, orderID string, req *pb.PlaceOrderRequest, prep orderPrep, total *pb.Money) (*orderspb.Order, error) {
+	ctx, _, endStep := startStep(ctx, "create_order", orderID, false, attrItems.Int(len(prep.orderItems)))
 	ctx, cancel := context.WithTimeout(ctx, createOrderTimeout)
 	defer cancel()
 	o, err := orderspb.NewOrderServiceClient(s.OrderConn).CreateOrder(ctx, buildCreateOrder(orderID, req, prep, total))
+	endStep(err)
 	if err == nil {
 		return o, nil
 	}
@@ -152,12 +154,14 @@ func (s *Service) failOrder(ctx context.Context, orderID string, cause error) {
 	if !s.ordersEnabled() {
 		return
 	}
+	ctx, _, endStep := startStep(ctx, "fail_order", orderID, true)
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), settleOrderTimeout)
 	defer cancel()
 	_, err := orderspb.NewOrderServiceClient(s.OrderConn).FailOrder(ctx, &orderspb.FailOrderRequest{
 		OrderId: orderID,
 		Reason:  failureReason(cause),
 	})
+	endStep(err)
 	if err != nil {
 		log.WithContext(ctx).WithField("order_id", orderID).WithError(err).Error("[PlaceOrder] FailOrder failed, the order stays PENDING")
 	}
@@ -174,8 +178,11 @@ func (s *Service) confirmOrder(ctx context.Context, orderID, trackingID, txID st
 	if !s.ordersEnabled() {
 		return
 	}
+	ctx, span, endStep := startStep(ctx, "confirm_order", orderID, false)
 	ctx = context.WithoutCancel(ctx)
+	attempts := 0
 	err := retry(confirmAttempts, confirmBackoff, func() error {
+		attempts++
 		actx, cancel := context.WithTimeout(ctx, confirmTimeout)
 		defer cancel()
 		_, err := orderspb.NewOrderServiceClient(s.OrderConn).ConfirmOrder(actx, &orderspb.ConfirmOrderRequest{
@@ -188,6 +195,8 @@ func (s *Service) confirmOrder(ctx context.Context, orderID, trackingID, txID st
 		c := status.Code(err)
 		return c != codes.FailedPrecondition && c != codes.NotFound && c != codes.InvalidArgument
 	})
+	span.SetAttributes(attrAttempts.Int(attempts))
+	endStep(err)
 	if err != nil {
 		log.WithContext(ctx).WithFields(logrus.Fields{
 			"order_id":       orderID,

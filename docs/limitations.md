@@ -12,4 +12,4 @@
 - The Kafka producer was tested with a fake publisher and against a single throwaway `apache/kafka:4.3.2` node (publish and read back, same key on one partition, broker unreachable); it was **not run** in the compose stack, against a broker that goes away mid-run, with TLS/SASL (the compose broker is plaintext without auth) or with several checkout replicas.
 - Health is static; readiness does not reflect downstream availability.
 - Image is `amd64`-only and runs as root unless the pod overrides it.
-- Retries exist only for `Commit`, `Release` and `ConfirmOrder` (3 attempts each; the Kafka publish is one attempt chain bounded by 5 s); every other call is a single attempt with no timeout beyond the incoming request context (except the ones named in the docs).
+- Retries exist only for `Commit`, `Release` and `ConfirmOrder` (3 attempts each; the Kafka publish is one attempt chain bounded by 5 s); every other call is a single attempt with its own deadline (3 s for cart, catalog, currency and the shipping quote, 10 s for `Charge`, 5 s for `ShipOrder` and the e-mail call; a shorter deadline of the caller wins, see Deadlines).
