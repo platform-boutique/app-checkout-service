@@ -1,8 +1,27 @@
 # Develop & test
 
+## Checks and commands
+
+Requirements: Go 1.26 (`GOTOOLCHAIN=auto` fetches the `go.mod` version; the host has Go 1.22), Docker for the image and the Kafka integration test, Python 3.12 for the docs check. The commands below are the ones the shared pipeline (`platform-demo-workflows`) runs, so a failure can be reproduced without pushing. `Running locally` above has the run commands.
+
+| Step | Command | Result on 2026-11-21 |
+|---|---|---|
+| Format | `gofmt -l .` | run, no files listed |
+| Vet and unit tests | `go vet ./... && go test -race -count=1 ./...` | run, passed (5 packages with tests) |
+| Lint | `golangci-lint run ./...` (CI pins golangci-lint v2.14.0) | not run (not installed on the host) |
+| Vulnerabilities and security | `govulncheck ./...`, `gosec -exclude-generated ./...` | not run |
+| Kafka integration test | see [Kafka integration tests](#kafka-integration-tests): `go test -tags integration -race -count=1 ./internal/checkout/ -run TestKafka` | not run today |
+| End-to-end test | `go test -tags e2e -race -count=1 ./tests/e2e/` (in-process fake downstream servers, no stack needed) | run, passed |
+| Proto | `protoc -I proto --go_out=proto --go_opt=paths=source_relative --go-grpc_out=proto --go-grpc_opt=paths=source_relative proto/checkout.proto` (protoc 3.21.12, protoc-gen-go 1.36.11, protoc-gen-go-grpc 1.6.1, the versions in the generated files). The vendored `proto/orders` and `proto/inventory` are copies of the other services' contracts with their own `go_package` | not run. Changes are additive only, server first |
+| Image | `docker build -t platform-demo/checkout-service:local .` | not run today |
+| Image scan | `trivy image --severity CRITICAL,HIGH --exit-code 1 platform-demo/checkout-service:local` | not run today |
+| Secret scan | `pre-commit run --all-files` (`.pre-commit-config.yaml`, gitleaks v8.30.1) or `gitleaks git --redact` | run with the gitleaks binary of the pre-commit cache (`gitleaks git --redact`, full history, 68 commits): no leaks found |
+| Workflow lint | `actionlint` | run (actionlint 1.7.12), no findings |
+| Docs | `mkdocs build --strict` (mkdocs 1.6.1 + mkdocs-techdocs-core 1.7.1, Python 3.12 venv) and the link check `python3 -I tools/check-md-links.py .` from `platform-demo-workflows` (relative links in `README.md` and `docs/`) | run, both passed |
+
 ## Running locally
 
-Requirements: Go 1.25+, Docker, [`grpcurl`](https://github.com/fullstorydev/grpcurl), and the six downstream services (or stand-ins) for a *successful* order.
+Requirements: Go 1.26 (`GOTOOLCHAIN=auto` fetches the `go.mod` version), Docker, [`grpcurl`](https://github.com/fullstorydev/grpcurl), and the six downstream services (or stand-ins) for a *successful* order.
 
 ```bash
 go build ./... && go run ./cmd/server
@@ -65,5 +84,5 @@ The unit tests (`events_test.go`) use a fake publisher and need nothing.
 ├── proto/                     # checkout.proto + generated Go (checkout.pb.go, checkout_grpc.pb.go)
 ├── Dockerfile
 ├── go.mod / go.sum
-└── docs/                      # empty placeholder
+└── docs/                      # TechDocs pages (mkdocs.yml in the root), docs/adr/ = decisions
 ```

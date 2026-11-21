@@ -6,13 +6,18 @@ repo_url: https://github.com/platform-boutique/app-checkout-service
 edit_uri: edit/main/docs/
 nav:
   - Overview: index.md
+  - Architecture: architecture.md
   - API: api.md
   - Configuration: configuration.md
   - Container image: container-image.md
   - Kubernetes: kubernetes.md
   - Observability: observability.md
+  - Operations: operations.md
   - Develop & test: development.md
   - Known limitations: limitations.md
+  - Decisions:
+      - "1. Saga with best-effort compensation": adr/0001-saga-with-best-effort-compensation.md
+      - "2. Legacy proto package hipstershop": adr/0002-legacy-proto-package-hipstershop.md
 theme:
   name: material
   features:

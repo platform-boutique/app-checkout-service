@@ -30,7 +30,7 @@ Startup is near-instant; no `startupProbe` needed.
 ```yaml
 securityContext:
   runAsNonRoot: true
-  runAsUser: 10001        # image runs as root by default; any non-zero UID works
+  runAsUser: 10001        # same as the image USER
   runAsGroup: 10001
   readOnlyRootFilesystem: true     # static Go binary, writes nothing
   allowPrivilegeEscalation: false

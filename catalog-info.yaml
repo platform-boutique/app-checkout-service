@@ -15,7 +15,7 @@ metadata:
     grafana/dashboard-selector: "tags @> 'checkout'"
     grafana/alert-label-selector: "service=checkout-service"
     grafana/overview-dashboard: "https://grafana.platform-demo.click/d/checkout-service-overview"
-  tags: [go, grpc]
+  tags: [go, grpc, kafka]
   links:
     - { url: "https://argocd.platform-demo.click/applications/argocd/dev-checkout-service", title: Argo CD, icon: dashboard }
     - { url: "https://grafana.platform-demo.click/d/checkout-service-overview", title: Grafana dashboard, icon: dashboard }
@@ -25,14 +25,17 @@ spec:
   owner: group:default/maintainers
   system: shop
   providesApis: [checkout-service-api]
-  consumesApis: [cart-service-api, currency-service-api, email-service-api, payment-service-api, product-catalog-service-api, shipping-service-api]
+  consumesApis: [cart-service-api, currency-service-api, email-service-api, inventory-service-api, order-service-api, payment-service-api, product-catalog-service-api, shipping-service-api]
   dependsOn:
     - component:default/cart-service
     - component:default/currency-service
     - component:default/email-service
+    - component:default/inventory-service
+    - component:default/order-service
     - component:default/payment-service
     - component:default/product-catalog-service
     - component:default/shipping-service
+    - resource:default/kafka
 ---
 apiVersion: backstage.io/v1alpha1
 kind: API
