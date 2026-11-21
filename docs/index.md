@@ -7,7 +7,7 @@ A gRPC service that orchestrates order placement for the platform-demo e-commerc
 </div>
 
 <div class="pd-facts" markdown>
-<div><span>Runtime</span><strong>Go 1.25</strong><small>Go</small></div>
+<div><span>Runtime</span><strong>Go 1.26</strong><small>Go</small></div>
 <div><span>Listens on</span><strong>5050</strong><small>gRPC</small></div>
 <div><span>State</span><strong>Stateless</strong></div>
 <div><span>Image</span><strong>checkout-service</strong><small>mladenovskistefan/</small></div>
@@ -15,7 +15,7 @@ A gRPC service that orchestrates order placement for the platform-demo e-commerc
 
 ## Where it sits
 
-Called by `frontend`. It calls `cart-service`, `currency-service`, `email-service`, `payment-service`, `product-catalog-service`, `shipping-service`.
+Called by `frontend`. It calls `cart-service`, `currency-service`, `email-service`, `payment-service`, `product-catalog-service`, `shipping-service` and, when configured, `order-service`, `inventory-service` and Kafka (dotted).
 
 ```mermaid
 flowchart LR
@@ -27,6 +27,9 @@ flowchart LR
   checkout_service --> payment_service["payment-service"]
   checkout_service --> product_catalog_service["product-catalog-service"]
   checkout_service --> shipping_service["shipping-service"]
+  checkout_service -.-> order_service["order-service"]
+  checkout_service -.-> inventory_service["inventory-service"]
+  checkout_service -.-> kafka[("Kafka")]
   classDef me stroke-width:3px;
 ```
 
@@ -34,7 +37,7 @@ flowchart LR
 
 | | |
 |---|---|
-| **Language / runtime** | Go 1.25 (static binary, `CGO_ENABLED=0`) |
+| **Language / runtime** | Go 1.26 (`go 1.26.11` in `go.mod`; static binary, `CGO_ENABLED=0`) |
 | **Image** | `mladenovskistefan/checkout-service` |
 | **Protocol / port** | gRPC (HTTP/2, plaintext) on `5050` |
 | **Metrics** | Prometheus `/metrics` on `9090` (scraped by Alloy) and pushed over OTLP/gRPC (registry bridged into OpenTelemetry); `build_info` gauge |
@@ -43,6 +46,8 @@ flowchart LR
 | **Depends on** | `product-catalog-service`, `cart-service`, `currency-service`, `shipping-service`, `payment-service`, `email-service`; optional: `order-service`, `inventory-service`, Kafka (`KAFKA_BROKERS`, produces `orders.placed`) |
 | **Called by** | `frontend` |
 | **gRPC reflection** | Enabled — `grpcurl` works without `-proto` |
+
+Pages: [architecture](architecture.md), [API](api.md), [configuration](configuration.md), [observability](observability.md), [operations](operations.md), [development](development.md), [decisions](adr/0001-saga-with-best-effort-compensation.md).
 
 ## Find it elsewhere
 
