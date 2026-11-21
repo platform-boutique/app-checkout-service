@@ -1,8 +1,9 @@
-# Local secret blocking. One-time setup per clone:  pipx install pre-commit && pre-commit install
-# - every commit: gitleaks scans the staged changes, plus private-key / large-file checks
-# - every push:   gitleaks scans the commits being pushed before anything leaves the machine
-# This is a fast local guard (git push --no-verify skips it); GitHub push protection and the
-# CI secret scan are the enforcing layers.
+# Local guard that runs the same checks as CI. One-time setup per clone:  pipx install pre-commit && pre-commit install
+# - every commit: gitleaks scans the staged changes, private-key / large-file checks, gofmt
+# - every push:   gitleaks scans the commits being pushed, golangci-lint
+# Format and lint use the same tools and pinned versions as the shared CI workflow (platform-demo-workflows), so a clean
+# local run means the `Lint & Format` job passes. This is a fast local guard (git push --no-verify skips it); the CI jobs,
+# GitHub push protection and the CI secret scan are the enforcing layers.
 default_install_hook_types: [pre-commit, pre-push]
 
 repos:
@@ -22,6 +23,23 @@ repos:
 
   - repo: local
     hooks:
+      - id: gofmt
+        name: gofmt (as CI)
+        language: system
+        types: [go]
+        pass_filenames: false
+        entry: bash -c 'out=$(gofmt -l -e .); if [ -n "$out" ]; then echo "These files are not formatted:"; echo "$out"; exit 1; fi'
+        stages: [pre-commit]
+      - id: golangci-lint
+        name: golangci-lint v2.14.0 (as CI)
+        language: golang
+        # keep the version equal to the one in platform-demo-workflows (service-ci-go.yaml)
+        additional_dependencies: [github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.14.0]
+        entry: golangci-lint run
+        types: [go]
+        pass_filenames: false
+        require_serial: true
+        stages: [pre-push]
       - id: gitleaks-push
         name: gitleaks (commits being pushed)
         language: golang
