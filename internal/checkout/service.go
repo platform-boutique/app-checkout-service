@@ -166,6 +166,8 @@ func (s *Service) PlaceOrder(ctx context.Context, req *pb.PlaceOrderRequest) (*p
 		return nil, st
 	}
 
+	ordersPlacedTotal.Inc()
+
 	// Charged and shipped: the stock is sold. A failure is only logged.
 	s.commitStock(ctx, orderID)
 
@@ -358,6 +360,7 @@ func (s *Service) chargeCard(ctx context.Context, amount *pb.Money, paymentInfo 
 		Amount:     amount,
 		CreditCard: paymentInfo,
 	})
+	paymentsTotal.WithLabelValues(chargeOutcome(err)).Inc()
 	if err != nil {
 		return "", newCallError("payment", fmt.Errorf("could not charge the card: %w", err))
 	}
@@ -400,6 +403,7 @@ func (s *Service) refundCharge(ctx context.Context, txID string, amount *pb.Mone
 		TransactionId: txID,
 		Amount:        amount,
 	})
+	refundsTotal.WithLabelValues(resultLabel(err)).Inc()
 	if err != nil {
 		return "", newCallError("payment", fmt.Errorf("refund failed: %w", err))
 	}
