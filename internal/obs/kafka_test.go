@@ -9,15 +9,19 @@ import (
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	"go.opentelemetry.io/otel/trace"
+	"go.opentelemetry.io/otel/trace/noop"
 )
 
 func kafkaSetup(t *testing.T) *tracetest.SpanRecorder {
 	t.Helper()
 	rec := tracetest.NewSpanRecorder()
-	prevTP, prevProp := otel.GetTracerProvider(), otel.GetTextMapPropagator()
+	prevProp := otel.GetTextMapPropagator()
 	otel.SetTracerProvider(sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(rec)))
 	otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator(propagation.TraceContext{}, propagation.Baggage{}))
-	t.Cleanup(func() { otel.SetTracerProvider(prevTP); otel.SetTextMapPropagator(prevProp) })
+	// Back to a no-op provider, NOT to the value read before: the first SetTracerProvider of a process makes the default
+	// global provider delegate to it for good, so "restoring" that default would keep recording into this test's provider
+	// (same rule as recordSpans in internal/checkout/saga_trace_test.go).
+	t.Cleanup(func() { otel.SetTracerProvider(noop.NewTracerProvider()); otel.SetTextMapPropagator(prevProp) })
 	return rec
 }
 
