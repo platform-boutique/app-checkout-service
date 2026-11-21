@@ -465,3 +465,29 @@ func TestEvent_ParseBrokers(t *testing.T) {
 		}
 	}
 }
+
+// The topic name is the same rule as order-service (events.ConfigFromEnv/Validate) and email-service: KAFKA_TOPIC_PREFIX
+// trimmed, then "orders.placed" behind it; unset or blank changes nothing.
+func TestTopicName(t *testing.T) {
+	ok := map[string]string{
+		"":          "orders.placed",
+		"   ":       "orders.placed",
+		"dev.":      "dev.orders.placed",
+		" dev. ":    "dev.orders.placed",
+		"stage_1-.": "stage_1-.orders.placed",
+	}
+	for in, want := range ok {
+		got, err := TopicName(in)
+		if err != nil || got != want {
+			t.Errorf("TopicName(%q) = %q, %v, want %q", in, got, err, want)
+		}
+	}
+	for _, bad := range []string{"dev/x", "de v", "dev:", "ü", strings.Repeat("a", 240)} {
+		if got, err := TopicName(bad); err == nil {
+			t.Errorf("TopicName(%q) = %q, want an error", bad, got)
+		}
+	}
+	if got, err := TopicName(strings.Repeat("a", 249-len(OrdersPlacedTopic))); err != nil || len(got) != 249 {
+		t.Errorf("longest prefix: %d, %v", len(got), err)
+	}
+}

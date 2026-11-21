@@ -82,7 +82,7 @@ func closePublisher(t *testing.T, pub *KafkaPublisher) {
 
 func TestKafka_PlaceOrder_PublishesRealEvent_ReadBack(t *testing.T) {
 	brokers := testBrokers(t)
-	pub, err := NewKafkaPublisher(brokers)
+	pub, err := NewKafkaPublisher(brokers, OrdersPlacedTopic)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -157,7 +157,7 @@ func TestKafka_PlaceOrder_PublishesRealEvent_ReadBack(t *testing.T) {
 // The same key always lands on the same partition (ordering per order id).
 func TestKafka_SameKeySamePartition(t *testing.T) {
 	brokers := testBrokers(t)
-	pub, err := NewKafkaPublisher(brokers)
+	pub, err := NewKafkaPublisher(brokers, OrdersPlacedTopic)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -205,7 +205,7 @@ func total(m map[int32]int) (n int) {
 // A broker that is down: the producer is created anyway, PlaceOrder succeeds within the
 // bound and the failure is logged. Nothing listens on 127.0.0.1:1.
 func TestKafka_BrokerDown_PlaceOrderStillSucceedsWithinBound(t *testing.T) {
-	pub, err := NewKafkaPublisher([]string{"127.0.0.1:1"})
+	pub, err := NewKafkaPublisher([]string{"127.0.0.1:1"}, OrdersPlacedTopic)
 	if err != nil {
 		t.Fatalf("a producer for a dead broker must still be created (lazy connect): %v", err)
 	}

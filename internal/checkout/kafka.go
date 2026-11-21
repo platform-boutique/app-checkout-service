@@ -3,6 +3,7 @@ package checkout
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"strings"
 
 	"checkout-service/internal/obs"
@@ -17,6 +18,27 @@ import (
 // fails because a broker is down: produce errors surface per call.
 type KafkaPublisher struct {
 	client *kgo.Client
+	topic  string
+}
+
+// topicChars are the characters Kafka allows in a topic name; maxTopicLen is its length limit.
+var topicChars = regexp.MustCompile(`^[a-zA-Z0-9._-]*$`)
+
+const maxTopicLen = 249
+
+// TopicName returns the topic the event is published to: the value of KAFKA_TOPIC_PREFIX (surrounding blanks
+// ignored, empty = none) in front of OrdersPlacedTopic, so several environments can share one Kafka cluster
+// (FUT-03). order-service and email-service build the same name from the same variable. A prefix that cannot be
+// part of a Kafka topic name is an error (checked at start, so a typo is one line and not an event nobody reads).
+func TopicName(prefix string) (string, error) {
+	prefix = strings.TrimSpace(prefix)
+	if !topicChars.MatchString(prefix) {
+		return "", fmt.Errorf("KAFKA_TOPIC_PREFIX %q: only letters, digits, '.', '_' and '-' are allowed", prefix)
+	}
+	if len(prefix)+len(OrdersPlacedTopic) > maxTopicLen {
+		return "", fmt.Errorf("KAFKA_TOPIC_PREFIX is too long: the topic name may have at most %d characters", maxTopicLen)
+	}
+	return prefix + OrdersPlacedTopic, nil
 }
 
 // ParseBrokers splits KAFKA_BROKERS (comma separated) into seed brokers.
@@ -31,12 +53,13 @@ func ParseBrokers(v string) []string {
 	return out
 }
 
-// NewKafkaPublisher creates the producer for the orders.placed topic.
-func NewKafkaPublisher(brokers []string) (*KafkaPublisher, error) {
+// NewKafkaPublisher creates the producer for the given topic (TopicName of KAFKA_TOPIC_PREFIX; OrdersPlacedTopic
+// without a prefix).
+func NewKafkaPublisher(brokers []string, topic string) (*KafkaPublisher, error) {
 	cl, err := kgo.NewClient(
 		kgo.SeedBrokers(brokers...),
 		kgo.ClientID("checkout-service"),
-		kgo.DefaultProduceTopic(OrdersPlacedTopic),
+		kgo.DefaultProduceTopic(topic),
 		kgo.RequiredAcks(kgo.AllISRAcks()),
 		// Idempotent writes are franz-go's default; they need acks=all, which is set above.
 		kgo.RecordDeliveryTimeout(publishTimeout),
@@ -51,28 +74,28 @@ func NewKafkaPublisher(brokers []string) (*KafkaPublisher, error) {
 	if err != nil {
 		return nil, fmt.Errorf("kafka client: %w", err)
 	}
-	return &KafkaPublisher{client: cl}, nil
+	return &KafkaPublisher{client: cl, topic: topic}, nil
 }
 
 // buildRecord turns the message into a record and starts the PRODUCER span, a child of
 // the PlaceOrder span in ctx; its W3C traceparent/tracestate go into the record headers so
 // order-service and email-service continue the same trace (OBS-61).
-func buildRecord(ctx context.Context, msg Message) (context.Context, *kgo.Record, trace.Span) {
+func buildRecord(ctx context.Context, topic string, msg Message) (context.Context, *kgo.Record, trace.Span) {
 	hs := make([]obs.KafkaHeader, len(msg.Headers))
 	for i, h := range msg.Headers {
 		hs[i] = obs.KafkaHeader{Key: h.Key, Value: []byte(h.Value)}
 	}
-	ctx, span := obs.ProducerSpan(ctx, OrdersPlacedTopic, &hs)
+	ctx, span := obs.ProducerSpan(ctx, topic, &hs)
 	headers := make([]kgo.RecordHeader, len(hs))
 	for i, h := range hs {
 		headers[i] = kgo.RecordHeader{Key: h.Key, Value: h.Value}
 	}
-	return ctx, &kgo.Record{Key: []byte(msg.Key), Value: msg.Value, Headers: headers}, span
+	return ctx, &kgo.Record{Topic: topic, Key: []byte(msg.Key), Value: msg.Value, Headers: headers}, span
 }
 
 // Publish sends the record and waits for the acknowledgement of all in-sync replicas.
 func (p *KafkaPublisher) Publish(ctx context.Context, msg Message) error {
-	ctx, rec, span := buildRecord(ctx, msg)
+	ctx, rec, span := buildRecord(ctx, p.topic, msg)
 	err := p.client.ProduceSync(ctx, rec).FirstErr()
 	obs.EndSpan(span, err)
 	return err

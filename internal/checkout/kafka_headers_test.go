@@ -24,7 +24,7 @@ func TestBuildRecordInjectsTraceContext(t *testing.T) {
 
 	ctx, root := otel.Tracer("t").Start(context.Background(), "PlaceOrder")
 	msg := Message{Key: "o1", Value: []byte(`{}`), Headers: []Header{{Key: "event-type", Value: eventType}, {Key: "schema-version", Value: "1"}}}
-	_, rec, span := buildRecord(ctx, msg)
+	_, rec, span := buildRecord(ctx, OrdersPlacedTopic, msg)
 	span.End()
 	root.End()
 
@@ -48,11 +48,38 @@ func TestBuildRecordInjectsTraceContext(t *testing.T) {
 
 // Without telemetry (no SDK) the headers still carry nothing invalid: no traceparent at all.
 func TestBuildRecordWithoutActiveSpanAddsNoTraceparent(t *testing.T) {
-	_, rec, span := buildRecord(context.Background(), Message{Key: "o1", Headers: []Header{{Key: "event-type", Value: eventType}}})
+	_, rec, span := buildRecord(context.Background(), OrdersPlacedTopic, Message{Key: "o1", Headers: []Header{{Key: "event-type", Value: eventType}}})
 	span.End()
 	for _, h := range rec.Headers {
 		if h.Key == "traceparent" && string(h.Value) == "00-00000000000000000000000000000000-0000000000000000-00" {
 			t.Fatal("all-zero traceparent injected")
+		}
+	}
+}
+
+// KAFKA_TOPIC_PREFIX (FUT-03): the record, the span name and the destination attribute carry the prefixed topic; without a
+// prefix everything is exactly "orders.placed" as before.
+func TestBuildRecordUsesTheGivenTopic(t *testing.T) {
+	spans := tracetest.NewSpanRecorder()
+	prevProp := otel.GetTextMapPropagator()
+	otel.SetTracerProvider(sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(spans)))
+	otel.SetTextMapPropagator(propagation.TraceContext{})
+	defer func() { otel.SetTracerProvider(noop.NewTracerProvider()); otel.SetTextMapPropagator(prevProp) }()
+
+	for _, topic := range []string{"orders.placed", "dev.orders.placed"} {
+		_, rec, span := buildRecord(context.Background(), topic, Message{Key: "o1"})
+		span.End()
+		if rec.Topic != topic {
+			t.Errorf("record topic = %q, want %q", rec.Topic, topic)
+		}
+	}
+	ended := spans.Ended()
+	if len(ended) != 2 || ended[0].Name() != "orders.placed publish" || ended[1].Name() != "dev.orders.placed publish" {
+		t.Fatalf("span names: %v", ended)
+	}
+	for _, a := range ended[1].Attributes() {
+		if string(a.Key) == "messaging.destination.name" && a.Value.AsString() != "dev.orders.placed" {
+			t.Errorf("destination = %q", a.Value.AsString())
 		}
 	}
 }
