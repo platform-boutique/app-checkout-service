@@ -30,7 +30,7 @@ jobs:
       packages: write
       id-token: write # keyless cosign signing
       actions: read # the approval jobs read who approved the environments stage and prod of this run
-    uses: platform-boutique/platform-demo-workflows/.github/workflows/service-publish.yaml@a277aeb9226f9b2905cbf9d77626f69bd770f486 # v3.7.0
+    uses: platform-boutique/platform-demo-workflows/.github/workflows/service-publish.yaml@4e25ad45aa4672355cde027a2a053c956f38576f # v3.8.0
     with:
       app: checkout-service
       before: ${{ inputs.before }}

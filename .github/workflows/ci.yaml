@@ -19,7 +19,7 @@ jobs:
     permissions:
       contents: read
       packages: write # the image job pushes ghcr.io/<repo>:tree-<hash> (same-repository runs; a fork's token stays read-only)
-    uses: platform-boutique/platform-demo-workflows/.github/workflows/service-ci-go.yaml@a277aeb9226f9b2905cbf9d77626f69bd770f486 # v3.7.0
+    uses: platform-boutique/platform-demo-workflows/.github/workflows/service-ci-go.yaml@4e25ad45aa4672355cde027a2a053c956f38576f # v3.8.0
     with:
       test-packages: ./internal/...
       e2e-packages: ./tests/e2e/...
@@ -41,4 +41,4 @@ jobs:
       contents: write
       pull-requests: write
       actions: write # starts Publish
-    uses: platform-boutique/platform-demo-workflows/.github/workflows/service-merge.yaml@a277aeb9226f9b2905cbf9d77626f69bd770f486 # v3.7.0
+    uses: platform-boutique/platform-demo-workflows/.github/workflows/service-merge.yaml@4e25ad45aa4672355cde027a2a053c956f38576f # v3.8.0
