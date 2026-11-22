@@ -96,7 +96,8 @@ func (s *Service) replayStoredOrder(ctx context.Context, orderID string, req *pb
 	} else {
 		get.SessionId = req.GetUserId()
 	}
-	o, err := orderspb.NewOrderServiceClient(s.OrderConn).GetOrder(ctx, get)
+	// NotFound is the normal answer for a new order: not an error span (see spanstatus.go).
+	o, err := orderspb.NewOrderServiceClient(s.OrderConn).GetOrder(expectCodes(ctx, codes.NotFound), get)
 	fields := log.WithContext(ctx).WithField("order_id", orderID)
 	if err != nil {
 		switch c := status.Code(err); c {
