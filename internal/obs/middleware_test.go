@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/sirupsen/logrus"
 	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
@@ -96,10 +97,17 @@ func TestGRPCRequestPathLogsCarryTraceIDs(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// The server span ends in the stats handler AFTER the reply is written, so it can end just after the
+	// client call returned: wait for it (generous deadline, no timing assumption).
 	var serverSpan sdktrace.ReadOnlySpan
-	for _, s := range rec.Ended() {
-		if s.SpanKind().String() == "server" {
-			serverSpan = s
+	for deadline := time.Now().Add(5 * time.Second); serverSpan == nil && time.Now().Before(deadline); {
+		for _, s := range rec.Ended() {
+			if s.SpanKind().String() == "server" {
+				serverSpan = s
+			}
+		}
+		if serverSpan == nil {
+			time.Sleep(5 * time.Millisecond)
 		}
 	}
 	if serverSpan == nil {
