@@ -12,7 +12,9 @@ import (
 
 	pb "checkout-service/proto"
 
+	"github.com/twmb/franz-go/pkg/kerr"
 	"github.com/twmb/franz-go/pkg/kgo"
+	"github.com/twmb/franz-go/pkg/kmsg"
 )
 
 // Run against a throwaway single-node Kafka (see docs/development.md):
@@ -221,6 +223,54 @@ func TestKafka_TopicPrefix_RecordLandsInPrefixedTopic(t *testing.T) {
 	}
 	if rec := readBackTopic(t, brokers, topic, key); rec.Topic != topic {
 		t.Errorf("topic = %q, want %q", rec.Topic, topic)
+	}
+}
+
+// CODE-09 / TEST-02 against a real broker: the first Publish creates the missing topic (the broker's default
+// partitions) before the record is sent, asking again is harmless, and the record is read back from it.
+func TestKafka_FirstPublishCreatesTheTopic(t *testing.T) {
+	brokers := testBrokers(t)
+	topic := "it-create-" + EventID(time.Now().String())[:8] + "." + OrdersPlacedTopic
+	pub, err := NewKafkaPublisher(brokers, topic)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closePublisher(t, pub)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	// Ask for the topic explicitly first, as the publisher does on its first Publish: it must not exist yet.
+	meta := func() *kmsg.MetadataResponseTopic {
+		req := kmsg.NewMetadataRequest()
+		rt := kmsg.NewMetadataRequestTopic()
+		rt.Topic = &topic
+		req.Topics = append(req.Topics, rt)
+		req.AllowAutoTopicCreation = false
+		resp, err := pub.client.Request(ctx, &req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return &resp.(*kmsg.MetadataResponse).Topics[0]
+	}
+	if mt := meta(); kerr.ErrorForCode(mt.ErrorCode) == nil {
+		t.Fatalf("topic %s exists before the first publish", topic)
+	}
+	key := "order-create-" + EventID(time.Now().String())
+	if err := pub.Publish(ctx, Message{Key: key, Value: []byte(`{"n":1}`)}); err != nil {
+		t.Fatal(err)
+	}
+	if !pub.topicReady.Load() {
+		t.Error("the publisher did not mark the topic as ready after creating it")
+	}
+	if mt := meta(); kerr.ErrorForCode(mt.ErrorCode) != nil || len(mt.Partitions) != 3 {
+		t.Errorf("topic after the publish: error %v, %d partitions (want the broker default of the test broker, 3)", kerr.ErrorForCode(mt.ErrorCode), len(mt.Partitions))
+	}
+	// A second creation request is success (TOPIC_ALREADY_EXISTS).
+	if err := ensureTopic(ctx, pub.client, topic); err != nil {
+		t.Errorf("ensureTopic on an existing topic: %v", err)
+	}
+	if rec := readBackTopic(t, brokers, topic, key); rec.Topic != topic {
+		t.Errorf("topic = %q", rec.Topic)
 	}
 }
 
