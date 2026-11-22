@@ -120,7 +120,11 @@ func run(port string) error {
 	// after Ship and Commit, best effort, and checkout no longer calls email-service.
 	// franz-go connects lazily: a broker that is down at startup does not stop checkout.
 	if brokers := checkout.ParseBrokers(os.Getenv("KAFKA_BROKERS")); len(brokers) > 0 {
-		pub, err := checkout.NewKafkaPublisher(brokers)
+		topic, err := checkout.TopicName(os.Getenv("KAFKA_TOPIC_PREFIX"))
+		if err != nil {
+			return err
+		}
+		pub, err := checkout.NewKafkaPublisher(brokers, topic)
 		if err != nil {
 			return fmt.Errorf("kafka producer: %w", err)
 		}
@@ -135,7 +139,7 @@ func run(port string) error {
 				log.Info("kafka producer flushed and closed")
 			}
 		}()
-		log.Infof("order events enabled (topic %s, brokers %s)", checkout.OrdersPlacedTopic, os.Getenv("KAFKA_BROKERS"))
+		log.Infof("order events enabled (topic %s, brokers %s)", topic, os.Getenv("KAFKA_BROKERS"))
 	} else {
 		log.Info("order events disabled: KAFKA_BROKERS is not set, no event is published and email-service is called directly")
 	}
