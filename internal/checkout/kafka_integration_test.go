@@ -32,9 +32,14 @@ func testBrokers(t *testing.T) []string {
 // readBack consumes orders.placed from the start until a record with the key shows up.
 func readBack(t *testing.T, brokers []string, key string) *kgo.Record {
 	t.Helper()
+	return readBackTopic(t, brokers, OrdersPlacedTopic, key)
+}
+
+func readBackTopic(t *testing.T, brokers []string, topic, key string) *kgo.Record {
+	t.Helper()
 	cl, err := kgo.NewClient(
 		kgo.SeedBrokers(brokers...),
-		kgo.ConsumeTopics(OrdersPlacedTopic),
+		kgo.ConsumeTopics(topic),
 		kgo.ConsumeResetOffset(kgo.NewOffset().AtStart()),
 	)
 	if err != nil {
@@ -192,6 +197,30 @@ func TestKafka_SameKeySamePartition(t *testing.T) {
 	}
 	if len(partitions) != 1 {
 		t.Errorf("one key on several partitions: %v", partitions)
+	}
+}
+
+// KAFKA_TOPIC_PREFIX (FUT-03) against a real broker: the record lands in <prefix>orders.placed.
+func TestKafka_TopicPrefix_RecordLandsInPrefixedTopic(t *testing.T) {
+	brokers := testBrokers(t)
+	prefix := "it-" + EventID(time.Now().String())[:8] + "."
+	topic, err := TopicName(prefix)
+	if err != nil || topic != prefix+OrdersPlacedTopic {
+		t.Fatalf("TopicName(%q) = %q, %v", prefix, topic, err)
+	}
+	pub, err := NewKafkaPublisher(brokers, topic)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closePublisher(t, pub)
+	key := "order-prefix-" + EventID(time.Now().String())
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := pub.Publish(ctx, Message{Key: key, Value: []byte(`{"n":1}`)}); err != nil {
+		t.Fatal(err)
+	}
+	if rec := readBackTopic(t, brokers, topic, key); rec.Topic != topic {
+		t.Errorf("topic = %q, want %q", rec.Topic, topic)
 	}
 }
 
