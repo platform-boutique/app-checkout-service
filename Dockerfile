@@ -1,6 +1,6 @@
 # --- Stage 1: Build ---
 # BuildKit sets TARGETOS/TARGETARCH from --platform, so the same Dockerfile builds amd64 and arm64.
-FROM --platform=$BUILDPLATFORM golang:1.26-alpine AS builder
+FROM --platform=$BUILDPLATFORM golang:1.26-alpine@sha256:ecb67f987aa1a57794c91d19ade7ae0209f2f0f5496aaef9e6ae85ddf92d02ab AS builder
 ARG TARGETOS TARGETARCH
 # Build identity, linked into internal/obs (a -X for a symbol the binary does not have is ignored by the linker)
 ARG SERVICE_VERSION=dev
@@ -21,7 +21,7 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build \
     ./cmd/server
 
 # --- Stage 2: Run ---
-FROM alpine:3.24
+FROM alpine:3.24@sha256:f59abe656b692d901e184be3445e084786602108599d2a51d229c0f5a48c71bf
 ARG SERVICE_VERSION=dev
 ARG SERVICE_COMMIT=unknown
 

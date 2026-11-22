@@ -4,18 +4,19 @@
 
 Requirements: Go 1.26 (`GOTOOLCHAIN=auto` fetches the `go.mod` version; the host has Go 1.22), Docker for the image and the Kafka integration test, Python 3.12 for the docs check. The commands below are the ones the shared pipeline (`platform-demo-workflows`) runs, so a failure can be reproduced without pushing. `Running locally` above has the run commands.
 
-| Step | Command | Result on 2026-11-21 |
+| Step | Command | Result (2026-11-22 unless noted) |
 |---|---|---|
 | Format | `gofmt -l .` | run, no files listed |
-| Vet and unit tests | `go vet ./... && go test -race -count=1 ./...` | run, passed (5 packages with tests) |
-| Lint | `golangci-lint run ./...` (CI pins golangci-lint v2.14.0) | not run (not installed on the host) |
-| Vulnerabilities and security | `govulncheck ./...`, `gosec -exclude-generated ./...` | not run |
-| Kafka integration test | see [Kafka integration tests](#kafka-integration-tests): `go test -tags integration -race -count=1 ./internal/checkout/ -run TestKafka` | not run today |
-| End-to-end test | `go test -tags e2e -race -count=1 ./tests/e2e/` (in-process fake downstream servers, no stack needed) | run, passed |
+| Vet and unit tests | `go vet ./... && go test -race -count=1 ./...` (also `go vet -tags integration` and `-tags e2e`) | run, passed (5 packages with tests; coverage: checkout 92.8%, obs 88.2%, healthcheck 87.5%, money 100%) |
+| Lint | `golangci-lint run ./...` (CI pins golangci-lint v2.14.0) | run with a v2.14.0 binary built from source: 0 issues without a tag, with `--build-tags integration` and with `--build-tags e2e` |
+| Vulnerabilities and security | `govulncheck ./...`, `gosec -exclude-generated ./...` | run: no vulnerabilities found; gosec 0 issues (24 files, 3148 lines) |
+| Kafka integration test | see [Kafka integration tests](#kafka-integration-tests): `go test -tags integration -race -count=1 ./internal/checkout/ -run TestKafka` | run against a throwaway `apache/kafka:4.3.2`: the 5 `TestKafka_*` tests pass with `-race`, and `-tags integration ./...` passes |
+| End-to-end test | `go test -tags e2e -race -count=1 ./tests/e2e/` (in-process fake downstream servers, no stack needed) | run, passed (4 tests) |
 | Proto | `protoc -I proto --go_out=proto --go_opt=paths=source_relative --go-grpc_out=proto --go-grpc_opt=paths=source_relative proto/checkout.proto` (protoc 3.21.12, protoc-gen-go 1.36.11, protoc-gen-go-grpc 1.6.1, the versions in the generated files). The vendored `proto/orders` and `proto/inventory` are copies of the other services' contracts with their own `go_package` | not run. Changes are additive only, server first |
-| Image | `docker build -t platform-demo/checkout-service:local .` | not run today |
-| Image scan | `trivy image --severity CRITICAL,HIGH --exit-code 1 platform-demo/checkout-service:local` | not run today |
-| Secret scan | `pre-commit run --all-files` (`.pre-commit-config.yaml`, gitleaks v8.30.1) or `gitleaks git --redact` | run with the gitleaks binary of the pre-commit cache (`gitleaks git --redact`, full history, 68 commits): no leaks found |
+| Image | `docker build -t platform-demo/checkout-service:local .` | run (`--platform linux/amd64`, base images pinned by digest): user `10001:10001`, exec-form HEALTHCHECK `healthy` after start, a plain `docker stop` of the idle container took 0.26 s and exited 0 |
+| Image scan | `trivy image --severity CRITICAL,HIGH --exit-code 1 platform-demo/checkout-service:local` | run (Trivy 0.76.1): exit 0, no CRITICAL or HIGH finding |
+| Whole local shop | `SKIP_BUILD=1 OBSERVABILITY=1 local/up.sh`, `local/smoke.sh`, `local/verify-signals.py` | run with this image: smoke passed three times in a row (87 steps each), `verify-signals.py` "ALL SIGNALS PRESENT" for the 14 services and one order trace across frontend, checkout, order-service and email-service |
+| Secret scan | `pre-commit run --all-files` (`.pre-commit-config.yaml`, gitleaks v8.30.1) or `gitleaks git --redact` | run with the gitleaks binary of the pre-commit cache (`gitleaks git --redact`, full history, 79 commits, 2026-11-22): no leaks found |
 | Workflow lint | `actionlint` | run (actionlint 1.7.12), no findings |
 | Docs | `mkdocs build --strict` (mkdocs 1.6.1 + mkdocs-techdocs-core 1.7.1, Python 3.12 venv) and the link check `python3 -I tools/check-md-links.py .` from `platform-demo-workflows` (relative links in `README.md` and `docs/`) | run, both passed |
 
@@ -72,7 +73,9 @@ go test -tags integration -race -count=1 ./internal/checkout/ -run TestKafka
 docker rm -f d1-kafka
 ```
 
-The unit tests (`events_test.go`) use a fake publisher and need nothing.
+The tests (`TestKafka_*`): `PlaceOrder_PublishesRealEvent_ReadBack` (record, headers, JSON), `SameKeySamePartition`, `TopicPrefix_RecordLandsInPrefixedTopic` (`KAFKA_TOPIC_PREFIX`), `FirstPublishCreatesTheTopic` (the topic does not exist, the first publish creates it with the broker's 3 partitions, a second creation request is success) and `BrokerDown_PlaceOrderStillSucceedsWithinBound`. Use any free port for the broker (`19194` was used on 2026-11-22: change both `KAFKA_ADVERTISED_LISTENERS` and the `-p` mapping and set `KAFKA_TEST_BROKERS=127.0.0.1:19194`).
+
+The unit tests (`events_test.go`, `kafka_topic_test.go`) use a fake publisher / fake broker and need nothing.
 
 ## Project structure
 

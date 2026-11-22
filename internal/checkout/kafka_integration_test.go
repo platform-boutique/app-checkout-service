@@ -12,7 +12,9 @@ import (
 
 	pb "checkout-service/proto"
 
+	"github.com/twmb/franz-go/pkg/kerr"
 	"github.com/twmb/franz-go/pkg/kgo"
+	"github.com/twmb/franz-go/pkg/kmsg"
 )
 
 // Run against a throwaway single-node Kafka (see docs/development.md):
@@ -32,9 +34,14 @@ func testBrokers(t *testing.T) []string {
 // readBack consumes orders.placed from the start until a record with the key shows up.
 func readBack(t *testing.T, brokers []string, key string) *kgo.Record {
 	t.Helper()
+	return readBackTopic(t, brokers, OrdersPlacedTopic, key)
+}
+
+func readBackTopic(t *testing.T, brokers []string, topic, key string) *kgo.Record {
+	t.Helper()
 	cl, err := kgo.NewClient(
 		kgo.SeedBrokers(brokers...),
-		kgo.ConsumeTopics(OrdersPlacedTopic),
+		kgo.ConsumeTopics(topic),
 		kgo.ConsumeResetOffset(kgo.NewOffset().AtStart()),
 	)
 	if err != nil {
@@ -192,6 +199,78 @@ func TestKafka_SameKeySamePartition(t *testing.T) {
 	}
 	if len(partitions) != 1 {
 		t.Errorf("one key on several partitions: %v", partitions)
+	}
+}
+
+// KAFKA_TOPIC_PREFIX (FUT-03) against a real broker: the record lands in <prefix>orders.placed.
+func TestKafka_TopicPrefix_RecordLandsInPrefixedTopic(t *testing.T) {
+	brokers := testBrokers(t)
+	prefix := "it-" + EventID(time.Now().String())[:8] + "."
+	topic, err := TopicName(prefix)
+	if err != nil || topic != prefix+OrdersPlacedTopic {
+		t.Fatalf("TopicName(%q) = %q, %v", prefix, topic, err)
+	}
+	pub, err := NewKafkaPublisher(brokers, topic)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closePublisher(t, pub)
+	key := "order-prefix-" + EventID(time.Now().String())
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := pub.Publish(ctx, Message{Key: key, Value: []byte(`{"n":1}`)}); err != nil {
+		t.Fatal(err)
+	}
+	if rec := readBackTopic(t, brokers, topic, key); rec.Topic != topic {
+		t.Errorf("topic = %q, want %q", rec.Topic, topic)
+	}
+}
+
+// CODE-09 / TEST-02 against a real broker: the first Publish creates the missing topic (the broker's default
+// partitions) before the record is sent, asking again is harmless, and the record is read back from it.
+func TestKafka_FirstPublishCreatesTheTopic(t *testing.T) {
+	brokers := testBrokers(t)
+	topic := "it-create-" + EventID(time.Now().String())[:8] + "." + OrdersPlacedTopic
+	pub, err := NewKafkaPublisher(brokers, topic)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closePublisher(t, pub)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	// Ask for the topic explicitly first, as the publisher does on its first Publish: it must not exist yet.
+	meta := func() *kmsg.MetadataResponseTopic {
+		req := kmsg.NewMetadataRequest()
+		rt := kmsg.NewMetadataRequestTopic()
+		rt.Topic = &topic
+		req.Topics = append(req.Topics, rt)
+		req.AllowAutoTopicCreation = false
+		resp, err := pub.client.Request(ctx, &req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return &resp.(*kmsg.MetadataResponse).Topics[0]
+	}
+	if mt := meta(); kerr.ErrorForCode(mt.ErrorCode) == nil {
+		t.Fatalf("topic %s exists before the first publish", topic)
+	}
+	key := "order-create-" + EventID(time.Now().String())
+	if err := pub.Publish(ctx, Message{Key: key, Value: []byte(`{"n":1}`)}); err != nil {
+		t.Fatal(err)
+	}
+	if !pub.topicReady.Load() {
+		t.Error("the publisher did not mark the topic as ready after creating it")
+	}
+	if mt := meta(); kerr.ErrorForCode(mt.ErrorCode) != nil || len(mt.Partitions) != 3 {
+		t.Errorf("topic after the publish: error %v, %d partitions (want the broker default of the test broker, 3)", kerr.ErrorForCode(mt.ErrorCode), len(mt.Partitions))
+	}
+	// A second creation request is success (TOPIC_ALREADY_EXISTS).
+	if err := ensureTopic(ctx, pub.client, topic); err != nil {
+		t.Errorf("ensureTopic on an existing topic: %v", err)
+	}
+	if rec := readBackTopic(t, brokers, topic, key); rec.Topic != topic {
+		t.Errorf("topic = %q", rec.Topic)
 	}
 }
 

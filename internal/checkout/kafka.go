@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"sync/atomic"
 
 	"checkout-service/internal/obs"
 
@@ -17,8 +18,12 @@ import (
 // timeout and no batching delay. franz-go connects lazily, so creating it never
 // fails because a broker is down: produce errors surface per call.
 type KafkaPublisher struct {
-	client *kgo.Client
-	topic  string
+	client  *kgo.Client
+	creator requester // client; tests inject a fake
+	topic   string
+	// topicReady is set once the topic exists (or this client may not create it): until then every Publish
+	// asks the broker to create it first (kafka_topic.go). Publish runs concurrently, hence atomic.
+	topicReady atomic.Bool
 }
 
 // topicChars are the characters Kafka allows in a topic name; maxTopicLen is its length limit.
@@ -68,13 +73,14 @@ func NewKafkaPublisher(brokers []string, topic string) (*KafkaPublisher, error) 
 		// The events are a few hundred bytes of JSON: compression gains nothing, and consumers in other languages (email-service uses
 		// the pure-Python kafka-python, which has no codec libraries) cannot read compressed batches (UnsupportedCodecError).
 		kgo.ProducerBatchCompression(kgo.NoCompression()),
-		// The topic is auto-created on first use (compose: KAFKA_NUM_PARTITIONS=3).
+		// Safety net: the first Publish creates the topic itself (ensureTopic); where that is not allowed the broker's
+		// auto-creation (compose: KAFKA_NUM_PARTITIONS=3) still takes care of it.
 		kgo.AllowAutoTopicCreation(),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("kafka client: %w", err)
 	}
-	return &KafkaPublisher{client: cl, topic: topic}, nil
+	return &KafkaPublisher{client: cl, creator: cl, topic: topic}, nil
 }
 
 // buildRecord turns the message into a record and starts the PRODUCER span, a child of
@@ -95,6 +101,7 @@ func buildRecord(ctx context.Context, topic string, msg Message) (context.Contex
 
 // Publish sends the record and waits for the acknowledgement of all in-sync replicas.
 func (p *KafkaPublisher) Publish(ctx context.Context, msg Message) error {
+	p.ensureTopicOnce(ctx)
 	ctx, rec, span := buildRecord(ctx, p.topic, msg)
 	err := p.client.ProduceSync(ctx, rec).FirstErr()
 	obs.EndSpan(span, err)

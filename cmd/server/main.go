@@ -177,7 +177,7 @@ func run(port string) error {
 func dialGRPC(addr string) (*grpc.ClientConn, error) {
 	conn, err := grpc.NewClient(addr,
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
-		grpc.WithStatsHandler(otelgrpc.NewClientHandler()),
+		grpc.WithStatsHandler(checkout.ExpectedStatusHandler(otelgrpc.NewClientHandler())),
 		grpc.WithChainUnaryInterceptor(obs.UnaryClientInterceptor()),
 	)
 	if err != nil {

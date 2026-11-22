@@ -115,7 +115,7 @@ Optional, switched on by `INVENTORY_SERVICE_ADDR` (for example `inventory-servic
 
 ### Order events (Kafka)
 
-Optional, switched on by `KAFKA_BROKERS` (comma separated seed brokers, for example `kafka:9092`). The topic is `orders.placed`, with `KAFKA_TOPIC_PREFIX` in front when set (`dev.orders.placed`; 3 partitions, replication 1, auto-created on first use by the broker config of the compose stack). Client: `github.com/twmb/franz-go` (`pkg/kgo`), pure Go.
+Optional, switched on by `KAFKA_BROKERS` (comma separated seed brokers, for example `kafka:9092`). The topic is `orders.placed`, with `KAFKA_TOPIC_PREFIX` in front when set (`dev.orders.placed`). The first publish asks the broker to create the topic when it is missing (CODE-09; partitions and replication are the broker's defaults, 3 and 1 in the compose stack; an existing topic is left alone; a refused request or an unreachable broker is logged and the record is sent anyway, then the broker's own auto-creation decides). Client: `github.com/twmb/franz-go` (`pkg/kgo`), pure Go.
 
 - **Unset or empty:** no event, Kafka is never contacted, and `PlaceOrder` behaves as before **including the direct `email-service.SendOrderConfirmation` call**.
 - **Set:** after `ShipOrder` and `Commit` succeeded and before checkout's own `ConfirmOrder`, one record is produced: key = the order id, headers `event-type=order.placed`, `content-type=application/json`, `schema-version=1`, `acks=all`, idempotent producer, a 5 s delivery timeout (the whole step is bounded by 5 s, also for a client that hangs). Checkout then **no longer calls email-service**: the email consumer sends the confirmation from the event. Order-service's consumer uses the same event to confirm an order whose `ConfirmOrder` was missed.

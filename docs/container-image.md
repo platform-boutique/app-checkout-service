@@ -11,5 +11,5 @@ Multi-stage [`Dockerfile`](https://github.com/platform-boutique/app-checkout-ser
 - **User: root.** The Dockerfile has no `USER`, and the image runs as UID 0 (verified). It needs no privileges (ports > 1024, no file writes), so set a non-root `runAsUser` in Kubernetes (e.g. `10001`) — no image change required.
 - **Architecture: `amd64` only** — `GOARCH=amd64` is hard-coded. On `arm64` nodes the pod fails with `exec format error`. Remove the flag (or use `buildx` with `TARGETARCH`) for multi-arch.
 - **EXPOSE:** `5050`, `9090`. **`HEALTHCHECK`:** exec form `["/app/checkout-service", "healthcheck"]` (gRPC `grpc.health.v1` Check on `127.0.0.1:${PORT:-5050}`, 3 s deadline, no shell tools).
-- **Image size:** ~10 MB. Alpine includes a shell, so `kubectl exec` works.
+- **Image size:** 12.5 MB unpacked (`docker image inspect`, 44.9 MB as `docker images` shows it for the amd64 image with its attestation manifest, 2026-11-22). Alpine includes a shell, so `kubectl exec` works.
 - `.dockerignore` excludes `vendor/` only; `.git` and `tests/` are sent in the build context.

@@ -19,7 +19,7 @@ On SIGTERM or SIGINT (`cmd/server/main.go`):
 3. if Kafka is on, the producer is flushed and closed, bounded by 4 s (`obs.DefaultShutdownTimeout`);
 4. telemetry and profiles are flushed, bounded by the same 4 s.
 
-Because of the 15 s drain, give the pod a termination grace period of at least 25 s (worst case 15 + 4 + 4 s). Whether the Helm chart sets this was not checked for this page. A measured `docker stop` was not run for this page.
+Because of the 15 s drain, give the pod a termination grace period of at least 25 s (worst case 15 + 4 + 4 s). A `docker stop` of the idle container exited 0 in 0.26 s (2026-11-22); a stop with a charge in flight was not run. The Helm chart (platform-demo-helm `checkout-service/values.yaml`, rendered by `platform-common`) sets `terminationGracePeriodSeconds: 30`, which is at least the 25 s needed (read 2026-11-22; no per-environment override found under `envs/`).
 
 ## Scaling and replicas
 
